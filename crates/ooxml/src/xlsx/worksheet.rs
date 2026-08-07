@@ -51,7 +51,9 @@ use crate::dom::{Document, NodeId};
 use crate::error::{Result, XlsxError};
 use crate::xlsx::cell::{Cell, CellError};
 use crate::xlsx::refs::{CellRange, CellRef, parse_row_number};
-use crate::xlsx::scan::{SML_NS, scan_merges, scan_sheet, sheet_dimension};
+use crate::xlsx::scan::{
+    SML_NS, SheetLayout, scan_layout, scan_merges, scan_sheet, sheet_dimension,
+};
 use crate::xlsx::workbook::Workbook;
 
 /// Куда `set_string` кладёт текст.
@@ -132,6 +134,21 @@ impl Sheet<'_, '_> {
         let i = self.at;
         self.wb
             .with_sheet_bytes(i, |data, _, limits| scan_merges(data, limits))
+    }
+
+    /// Объявленная геометрия листа: ширины столбцов и высоты строк.
+    ///
+    /// Возвращается то, что записано в файле, без попытки что-либо вычислить.
+    /// Для бланков это принципиально: у формы МВД все 68 столбцов шириной
+    /// 1,33 символа, и без этих чисел она разъезжается в нечитаемую сетку.
+    ///
+    /// # Errors
+    ///
+    /// Ошибки распаковки и XML.
+    pub fn layout(&mut self) -> Result<SheetLayout> {
+        let i = self.at;
+        self.wb
+            .with_sheet_bytes(i, |data, _, limits| scan_layout(data, limits))
     }
 
     /// Читает одну ячейку. `Ok(None)` — элемента `<c>` с таким адресом нет.

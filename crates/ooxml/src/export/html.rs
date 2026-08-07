@@ -11,16 +11,44 @@
 //! и ошибки по центру. Формула показывается подсказкой на ячейке, а в таблице
 //! стоит её кэшированное значение: вычислителя у ядра нет и не планируется.
 //!
+//! Переносятся также **объявленные** ширины столбцов и высоты строк. Это не
+//! вёрстка, а перенос чисел из файла, и для бланков он решающий: у формы МВД
+//! все 68 столбцов шириной 1,33 символа, и без этих чисел она разъезжается в
+//! нечитаемую сетку одинаковых клеток.
+//!
 //! # Что не переносится
 //!
-//! Шрифты, заливки, рамки, числовые форматы, ширины столбцов. Всё это живёт в
-//! `xl/styles.xml`, модель которого у нас намеренно минимальна — она отвечает
-//! на один вопрос («это дата?»), а не описывает оформление.
+//! Шрифты, заливки, рамки, числовые форматы. Всё это живёт в `xl/styles.xml`,
+//! модель которого у нас намеренно минимальна — она отвечает на один вопрос
+//! («это дата?»), а не описывает оформление.
 
 use core::fmt::Write as _;
 
 use crate::error::Result;
-use crate::xlsx::{CellRange, CellValue, Workbook};
+use crate::xlsx::{CellRange, CellValue, SheetLayout, Workbook};
+
+/// Ширина «нулевой» цифры шрифта по умолчанию, в пикселях.
+///
+/// Единица ширины столбца в Excel — не пиксель и не миллиметр, а ширина цифры
+/// шрифта книги. Для Calibri 11 это 7 px; отсюда и переводной коэффициент.
+/// Точное совпадение с Excel недостижимо (у нас нет его шрифтов), но без этого
+/// перевода бланк с колонками в 1,33 символа разъезжается в нечитаемую сетку.
+const PX_PER_CHAR: f64 = 7.0;
+/// Постоянная добавка на поля ячейки и линию сетки.
+const CELL_PADDING_PX: f64 = 5.0;
+
+/// Ширина столбца Excel в пикселях.
+fn col_px(width: f64) -> f64 {
+    if width <= 0.0 {
+        return 0.0;
+    }
+    (width * PX_PER_CHAR + CELL_PADDING_PX).round()
+}
+
+/// Высота строки: пункты в пиксели, 96 dpi против 72 pt на дюйм.
+fn row_px(points: f64) -> f64 {
+    (points * 4.0 / 3.0).round()
+}
 
 /// Настройки вывода.
 #[derive(Debug, Clone)]
@@ -139,9 +167,9 @@ h1{font-size:20px;margin:0 0 4px}
 .sheet h2{font-size:15px;margin:0 0 8px;font-weight:600}
 .sheet h2 .n{color:#6b6b66;font-weight:400;font-size:13px;margin-left:8px}
 .wrap{overflow-x:auto;border:1px solid #e0dfda;border-radius:6px;background:#fff}
-table{border-collapse:collapse;font-size:13px;white-space:nowrap}
-th,td{border:1px solid #eceae4;padding:3px 8px;height:24px;max-width:340px;overflow:hidden;
-text-overflow:ellipsis;vertical-align:middle}
+table{border-collapse:collapse;font-size:13px;table-layout:fixed}
+th,td{border:1px solid #eceae4;padding:2px 5px;overflow:hidden;text-overflow:ellipsis;
+white-space:nowrap;vertical-align:middle}
 thead th,tbody th{background:#f5f4f0;color:#6b6b66;font-weight:500;text-align:center;
 position:sticky;top:0;z-index:1}
 tbody th{position:static;min-width:44px}
@@ -201,6 +229,7 @@ pub fn workbook_to_html(wb: &mut Workbook<'_>, opts: &HtmlOptions) -> Result<Str
         let mut sheet = wb.sheet(i)?;
         let cells = sheet.read_all()?;
         let merges = sheet.merges()?;
+        let layout = sheet.layout()?;
 
         out.push_str("<section class=\"sheet\">\n<h2>");
         escape(&name, &mut out);
@@ -211,7 +240,7 @@ pub fn workbook_to_html(wb: &mut Workbook<'_>, opts: &HtmlOptions) -> Result<Str
             plural_cells(cells.len())
         );
 
-        match render_sheet(&cells, &merges, opts) {
+        match render_sheet(&cells, &merges, &layout, opts) {
             Some(table) => out.push_str(&table),
             None => out.push_str("<div class=\"wrap\"><p class=\"empty\">Лист пуст</p></div>\n"),
         }
@@ -237,6 +266,7 @@ fn plural_cells(n: usize) -> &'static str {
 fn render_sheet(
     cells: &[crate::xlsx::Cell],
     merges: &[CellRange],
+    layout: &SheetLayout,
     opts: &HtmlOptions,
 ) -> Option<String> {
     // Размах считается по фактическим данным, а не по объявленному
@@ -314,6 +344,23 @@ fn render_sheet(
     let mut out = String::with_capacity(rows.saturating_mul(cols).saturating_mul(24));
     out.push_str("<div class=\"wrap\"><table>\n");
 
+    // Ширины объявлены в файле — переносим их. `table-layout:fixed` нужен,
+    // чтобы браузер их слушался: при автоматической раскладке он растянет
+    // столбцы по содержимому и бланк перестанет быть бланком.
+    out.push_str("<colgroup>");
+    if opts.headers {
+        out.push_str("<col style=\"width:46px\">");
+    }
+    for c in 0..cols {
+        match layout.col_width(c as u32) {
+            Some(w) => {
+                let _ = write!(out, "<col style=\"width:{}px\">", col_px(w));
+            }
+            None => out.push_str("<col>"),
+        }
+    }
+    out.push_str("</colgroup>\n");
+
     if opts.headers {
         out.push_str("<thead><tr><th></th>");
         for c in 0..cols {
@@ -324,7 +371,12 @@ fn render_sheet(
 
     out.push_str("<tbody>\n");
     for r in 0..rows {
-        out.push_str("<tr>");
+        match layout.row_height(r as u32) {
+            Some(h) => {
+                let _ = write!(out, "<tr style=\"height:{}px\">", row_px(h));
+            }
+            None => out.push_str("<tr>"),
+        }
         if opts.headers {
             let _ = write!(out, "<th>{}</th>", r.saturating_add(1));
         }

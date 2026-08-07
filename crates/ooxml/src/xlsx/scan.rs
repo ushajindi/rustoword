@@ -618,6 +618,134 @@ pub fn scan_merges(part: &[u8], limits: &Limits) -> Result<Vec<CellRange>> {
     }
 }
 
+/// Диапазон столбцов с общей шириной.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColSpan {
+    /// Первый столбец диапазона, 0-based.
+    pub from: u32,
+    /// Последний столбец диапазона включительно, 0-based.
+    pub to: u32,
+    /// Ширина в «символах» — единица Excel, привязанная к ширине цифры
+    /// шрифта по умолчанию.
+    pub width: f64,
+    pub hidden: bool,
+}
+
+/// Объявленная геометрия листа.
+///
+/// Это не результат вёрстки, а то, что записано в файле. Экспорт переносит эти
+/// числа как есть; вычислять ширину по содержимому — уже работа движка
+/// типографики, которого у ядра нет.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SheetLayout {
+    /// `<sheetFormatPr defaultColWidth=>`, в символах.
+    pub default_col_width: Option<f64>,
+    /// `<sheetFormatPr defaultRowHeight=>`, в пунктах.
+    pub default_row_height: Option<f64>,
+    pub cols: Vec<ColSpan>,
+    /// Высоты строк в пунктах: `(строка 0-based, высота)`.
+    pub row_heights: Vec<(u32, f64)>,
+    /// Скрытые строки, 0-based.
+    pub hidden_rows: Vec<u32>,
+}
+
+impl SheetLayout {
+    /// Ширина столбца в символах с учётом диапазонов и значения по умолчанию.
+    #[must_use]
+    pub fn col_width(&self, col: u32) -> Option<f64> {
+        for c in &self.cols {
+            if col >= c.from && col <= c.to {
+                return if c.hidden { Some(0.0) } else { Some(c.width) };
+            }
+        }
+        self.default_col_width
+    }
+
+    /// Высота строки в пунктах.
+    #[must_use]
+    pub fn row_height(&self, row: u32) -> Option<f64> {
+        if self.hidden_rows.binary_search(&row).is_ok() {
+            return Some(0.0);
+        }
+        self.row_heights
+            .binary_search_by_key(&row, |&(r, _)| r)
+            .ok()
+            .and_then(|i| self.row_heights.get(i))
+            .map(|&(_, h)| h)
+            .or(self.default_row_height)
+    }
+}
+
+/// Читает объявленную геометрию листа: ширины столбцов и высоты строк.
+///
+/// Отдельный проход, а не часть [`scan_sheet`]: геометрия нужна только
+/// экспорту, а платить за неё при каждом чтении значений незачем.
+///
+/// # Errors
+///
+/// Ошибки XML; [`XlsxError::BadCellRef`] на неразбираемом номере строки.
+pub fn scan_layout(part: &[u8], limits: &Limits) -> Result<SheetLayout> {
+    let mut rd = Reader::with_limits(part, limits.clone());
+    let mut out = SheetLayout::default();
+    loop {
+        match rd.next_event()? {
+            Event::Start { .. } => {
+                if !in_sml(&rd) {
+                    continue;
+                }
+                match local_name(&rd) {
+                    b"sheetFormatPr" => {
+                        out.default_col_width = attr_f64(&rd, b"defaultColWidth")?;
+                        out.default_row_height = attr_f64(&rd, b"defaultRowHeight")?;
+                    }
+                    b"col" => {
+                        // `min`/`max` в файле 1-based и включительные.
+                        let min = attr_f64(&rd, b"min")?.unwrap_or(1.0);
+                        let max = attr_f64(&rd, b"max")?.unwrap_or(min);
+                        if let Some(width) = attr_f64(&rd, b"width")? {
+                            out.cols.push(ColSpan {
+                                from: (min.max(1.0) as u32).saturating_sub(1),
+                                to: (max.max(1.0) as u32).saturating_sub(1),
+                                width,
+                                hidden: attr_bool(&rd, b"hidden"),
+                            });
+                        }
+                    }
+                    b"row" => {
+                        let Some(r) = attr_str(&rd, b"r")? else {
+                            continue;
+                        };
+                        let row = parse_row_number(r)?.saturating_sub(1);
+                        if let Some(h) = attr_f64(&rd, b"ht")? {
+                            out.row_heights.push((row, h));
+                        }
+                        if attr_bool(&rd, b"hidden") {
+                            out.hidden_rows.push(row);
+                        }
+                    }
+                    b"mergeCells" => break,
+                    _ => {}
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    out.row_heights.sort_unstable_by_key(|&(r, _)| r);
+    out.hidden_rows.sort_unstable();
+    Ok(out)
+}
+
+/// Числовой атрибут. `None` — атрибута нет или он не число.
+fn attr_f64(rd: &Reader<'_>, name: &[u8]) -> Result<Option<f64>> {
+    Ok(attr_str(rd, name)?.and_then(|v| v.trim().parse::<f64>().ok()))
+}
+
+/// Логический атрибут OOXML: истина — это `1` или `true`.
+fn attr_bool(rd: &Reader<'_>, name: &[u8]) -> bool {
+    matches!(raw_attr(rd, name), Some(b"1" | b"true"))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
