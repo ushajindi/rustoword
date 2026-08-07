@@ -37,6 +37,7 @@
 
 pub mod bytes;
 pub mod deflate;
+pub mod dom;
 pub mod error;
 pub mod hash;
 pub mod limits;
