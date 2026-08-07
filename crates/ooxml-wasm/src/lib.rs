@@ -172,7 +172,9 @@ fn build_sheet(bytes: &[u8], index: usize) -> Result<Vec<u8>, String> {
     let mut rows = 0u32;
     let mut cols = 0u32;
     for c in &cells {
-        if matches!(c.value, CellValue::Empty) && c.formula.is_none() {
+        // Размах считается и по оформленным пустым ячейкам: обрезав лист по
+        // последнему значению, мы отрезали бы правый и нижний край бланка.
+        if matches!(c.value, CellValue::Empty) && c.formula.is_none() && c.style.is_none() {
             continue;
         }
         rows = rows.max(c.at.row.saturating_add(1));
@@ -210,9 +212,13 @@ fn build_sheet(bytes: &[u8], index: usize) -> Result<Vec<u8>, String> {
         }
     }
 
+    // Пустая ячейка со стилем — не мусор, а носитель оформления: рамки
+    // бланка живут именно в них (`<c r="A20" s="17"/>` без значения). По
+    // корпусу непустых лишь 14 617 из 232 140, и отбросив остальные, мы
+    // выбросили бы все квадратики формы вместе с ними.
     let filled: Vec<_> = cells
         .iter()
-        .filter(|c| !matches!(c.value, CellValue::Empty))
+        .filter(|c| !matches!(c.value, CellValue::Empty) || c.style.is_some())
         .collect();
     o.extend_from_slice(&(filled.len() as u32).to_le_bytes());
     for c in filled {

@@ -113,19 +113,21 @@ const HEAD_W = 44, HEAD_H = 22;
 const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
 const stage = document.getElementById('stage'), edit = document.getElementById('edit');
 let S = null, ST = [], scroll = {x: 0, y: 0}, sel = {r: 0, c: 0}, showGrid = true;
-let xs = [], ys = [], covered = new Set(), spans = new Map();
+let xs = [], ys = [], covered = new Set(), spans = new Map(), inMerge = new Map();
 
 const colName = c => { let s = ''; for (;;) { s = String.fromCharCode(65 + c % 26) + s; if (c < 26) break; c = Math.floor(c / 26) - 1; } return s; };
 
 function geometry() {
   xs = [0]; for (let c = 0; c < S.cols; c++) xs.push(xs[c] + (S.w[c] || 64));
   ys = [0]; for (let r = 0; r < S.rows; r++) ys.push(ys[r] + (S.h[r] || 20));
-  covered = new Set(); spans = new Map();
+  covered = new Set(); spans = new Map(); inMerge = new Map();
   for (const m of S.merges) {
     spans.set(m.r0 * 65536 + m.c0, m);
     for (let r = m.r0; r <= m.r1; r++)
-      for (let c = m.c0; c <= m.c1; c++)
+      for (let c = m.c0; c <= m.c1; c++) {
+        inMerge.set(r * 65536 + c, m);
         if (r !== m.r0 || c !== m.c0) covered.add(r * 65536 + c);
+      }
   }
 }
 
@@ -171,29 +173,45 @@ function draw() {
     ctx.stroke();
   }
 
-  // текст и рамки
+  // Рамки — у КАЖДОЙ ячейки на её собственном месте, включая накрытые
+  // объединением. Рамку объединённой области OOXML хранит не в главной
+  // ячейке, а размазывает по всем составляющим: у левой лежит левая грань,
+  // у нижней — нижняя. Рисуя только главную, получаем вместо квадратика
+  // одну черту.
+  for (let r = r0; r < r1; r++) for (let c = c0; c < c1; c++) {
+    const cell = S.cells.get(r * 65536 + c);
+    const st = cell ? ST[cell.style] : null;
+    if (!st) continue;
+    const x = xs[c] + ox, y = ys[r] + oy, w = xs[c + 1] - xs[c], h = ys[r + 1] - ys[r];
+    // У объединения рисуется только внешний периметр: внутренние грани в
+    // Excel не видны, иначе клетка-бокс из двух столбцов разделилась бы
+    // лишней чертой посередине.
+    const m = inMerge.get(r * 65536 + c);
+    const ok = m ? [c === m.c0, c === m.c1, r === m.r0, r === m.r1] : [true, true, true, true];
+    const sides = [[st.b[0], x, y, x, y + h], [st.b[1], x + w, y, x + w, y + h],
+                   [st.b[2], x, y, x + w, y], [st.b[3], x, y + h, x + w, y + h]];
+    for (let si = 0; si < 4; si++) {
+      if (!ok[si]) continue;
+      const [b, x1, y1, x2, y2] = sides[si];
+      if (!b.w) continue;
+      ctx.strokeStyle = b.c || '#000'; ctx.lineWidth = b.w;
+      ctx.setLineDash(DASH[b.w] || []);
+      ctx.beginPath(); ctx.moveTo(Math.round(x1) + .5, Math.round(y1) + .5);
+      ctx.lineTo(Math.round(x2) + .5, Math.round(y2) + .5); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  // текст
   for (let r = r0; r < r1; r++) for (let c = c0; c < c1; c++) {
     const k = r * 65536 + c; if (covered.has(k)) continue;
     const cell = S.cells.get(k);
-    const st = cell ? ST[cell.style] : null;
+    if (!cell || !cell.text) continue;
+    const st = ST[cell.style];
     const sp = spans.get(k);
     const x = xs[c] + ox, y = ys[r] + oy;
     const w = (sp ? xs[Math.min(sp.c1 + 1, S.cols)] : xs[c + 1]) + ox - x;
     const h = (sp ? ys[Math.min(sp.r1 + 1, S.rows)] : ys[r + 1]) + oy - y;
-
-    if (st) {
-      const sides = [[st.b[0], x, y, x, y + h], [st.b[1], x + w, y, x + w, y + h],
-                     [st.b[2], x, y, x + w, y], [st.b[3], x, y + h, x + w, y + h]];
-      for (const [b, x1, y1, x2, y2] of sides) {
-        if (!b.w) continue;
-        ctx.strokeStyle = b.c || '#000'; ctx.lineWidth = b.w;
-        ctx.setLineDash(DASH[b.w] || []);
-        ctx.beginPath(); ctx.moveTo(Math.round(x1) + .5, Math.round(y1) + .5);
-        ctx.lineTo(Math.round(x2) + .5, Math.round(y2) + .5); ctx.stroke();
-        ctx.setLineDash([]);
-      }
-    }
-    if (!cell || !cell.text) continue;
 
     const size = st ? st.size : 15;
     ctx.font = `${st && st.italic ? 'italic ' : ''}${st && st.bold ? '700 ' : ''}${size}px ${st && st.font ? `'${st.font}',` : ''}serif`;
@@ -223,7 +241,12 @@ function draw() {
       // влево. Направление задаёт выравнивание: текст, прижатый вправо,
       // вытекает влево. Без этого «ФОРМА 1» обрезается до «1».
       let left = 0, right = 0;
-      const busy = (rr, cc) => S.cells.get(rr * 65536 + cc) || covered.has(rr * 65536 + cc);
+      // «Занята» — значит в ней есть ТЕКСТ. Ячейка с одним лишь стилем
+      // (рамка бланка) для Excel пустая, и текст соседа течёт поверх неё.
+      const busy = (rr, cc) => {
+        const n = S.cells.get(rr * 65536 + cc);
+        return (n && n.text) || covered.has(rr * 65536 + cc);
+      };
       if (ha !== 3) for (let cc = c + 1; cc < S.cols && !busy(r, cc); cc++) right += xs[cc + 1] - xs[cc];
       if (ha !== 1) for (let cc = c - 1; cc >= 0 && !busy(r, cc); cc--) left += xs[cc + 1] - xs[cc];
       // Клип по вертикали строгий, по горизонтали — до первой занятой ячейки.
