@@ -8,3 +8,6 @@ crates/ooxml/tests/corpus/MANIFEST.tsv
 
 # IDE
 .idea/
+
+# Рабочие копии агентов — не часть проекта.
+.claude/
