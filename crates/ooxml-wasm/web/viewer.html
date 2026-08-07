@@ -17,7 +17,9 @@ button:hover,label.file:hover{background:#f0f0ec}
 #formula{flex:1;padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:#fff;font-family:ui-monospace,monospace}
 #stage{flex:1;position:relative;overflow:hidden;background:#fff}
 canvas{position:absolute;inset:0;display:block}
-#edit{position:absolute;display:none;border:2px solid #1a73e8;padding:0 3px;font:inherit;outline:none;background:#fff;z-index:2}
+#edit{position:absolute;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none;border:0;padding:0;
+font:inherit;outline:none;background:#fff;z-index:2}
+#edit.on{opacity:1;width:auto;height:auto;pointer-events:auto;border:2px solid #1a73e8;padding:0 3px}
 footer{display:flex;gap:8px;align-items:center;padding:6px 12px;border-top:1px solid var(--line);background:#fff}
 .tab{padding:4px 12px;border:1px solid var(--line);border-bottom:none;border-radius:6px 6px 0 0;background:#f0f0ec;cursor:pointer}
 .tab.on{background:#fff;font-weight:600}
@@ -62,6 +64,15 @@ const W = {
   error() { return new TextDecoder().decode(this.take(this.ex.ooxml_error())); },
   sheet(i) { return this.take(this.ex.ooxml_sheet(i)); },
   styles() { return this.take(this.ex.ooxml_styles()); },
+  set(sheet, row, col, text) {
+    const b = new TextEncoder().encode(text);
+    const p = b.length ? this.ex.ooxml_alloc(b.length) : 0;
+    if (p) this.mem().set(b, p);
+    const ok = this.ex.ooxml_set(sheet, row, col, p, b.length) === 1;
+    if (p) this.ex.ooxml_free(p, b.length);
+    return ok;
+  },
+  save() { return this.take(this.ex.ooxml_save()); },
 };
 
 // ------------------------------------------------------- разбор блоков ядра
@@ -316,14 +327,150 @@ stage.addEventListener('wheel', e => {
 
 cv.addEventListener('mousedown', e => {
   if (!S) return;
+  // Гасим поведение по умолчанию: иначе браузер переводит фокус на документ
+  // уже ПОСЛЕ нашего focus(), поле ввода его теряет, и клавиатура перестаёт
+  // доходить куда бы то ни было.
+  e.preventDefault();
   const b = cv.getBoundingClientRect();
   const p = hit(e.clientX - b.left, e.clientY - b.top);
+  if (editing) commitEdit(false);
   sel = p;
-  const cell = S.cells.get(p.r * 65536 + p.c);
-  document.getElementById('addr').textContent = colName(p.c) + (p.r + 1);
-  document.getElementById('formula').value = cell ? cell.text : '';
+  edit.focus();
+  syncBar();
   draw();
 });
+
+// ------------------------------------------------------------------ правка
+let sheetIndex = 0, fileName = 'книга.xlsx', editing = false;
+
+/// Прямоугольник выделенной ячейки в координатах страницы.
+function selRect() {
+  const m = spans.get(sel.r * 65536 + sel.c);
+  const x = xs[sel.c] + HEAD_W - scroll.x, y = ys[sel.r] + HEAD_H - scroll.y;
+  const w = (m ? xs[Math.min(m.c1 + 1, S.cols)] : xs[sel.c + 1]) + HEAD_W - scroll.x - x;
+  const h = (m ? ys[Math.min(m.r1 + 1, S.rows)] : ys[sel.r + 1]) + HEAD_H - scroll.y - y;
+  return {x, y, w, h};
+}
+
+/// Открывает редактор поверх выделенной ячейки.
+///
+/// Поле ввода существует всегда и всегда в фокусе — просто в свёрнутом виде.
+/// Иначе быстрый набор расщепляется: часть нажатий успевает к canvas, часть
+/// к полю, и текст теряется. Один приёмник клавиатуры снимает гонку целиком.
+function beginEdit(initial) {
+  if (!S) return;
+  editing = true;
+  const r = selRect();
+  const cell = S.cells.get(sel.r * 65536 + sel.c);
+  const st = cell ? ST[cell.style] : null;
+  edit.style.left = r.x + 'px'; edit.style.top = r.y + 'px';
+  edit.style.width = Math.max(r.w, 60) + 'px'; edit.style.height = Math.max(r.h, 20) + 'px';
+  edit.style.font = `${st && st.bold ? '700 ' : ''}${st ? st.size : 15}px ${st && st.font ? `'${st.font}',` : ''}serif`;
+  edit.classList.add('on');
+  edit.value = initial !== undefined ? initial : (cell ? cell.text : '');
+  edit.focus();
+  if (initial === undefined) edit.select();
+  else edit.setSelectionRange(edit.value.length, edit.value.length);
+}
+
+/// Сворачивает редактор, не теряя фокус: клавиатура нужна и в режиме навигации.
+function endEdit() {
+  editing = false;
+  edit.classList.remove('on');
+  edit.value = '';
+  edit.style.left = '0px'; edit.style.top = '0px';
+  edit.focus();
+}
+
+async function commitEdit(move) {
+  if (!editing) return;
+  const text = edit.value;
+  const before = S.cells.get(sel.r * 65536 + sel.c);
+  endEdit();
+  if ((before ? before.text : '') !== text) {
+    const t0 = performance.now();
+    if (!W.set(sheetIndex, sel.r, sel.c, text)) {
+      status.textContent = 'правка не удалась: ' + W.error();
+      return;
+    }
+    // Перечитываем лист из ядра: оно единственный источник истины, и после
+    // записи в файле могло измениться больше, чем одна ячейка (общая
+    // таблица строк, размах листа, флаг пересчёта).
+    S = parseSheet(W.sheet(sheetIndex));
+    geometry();
+    status.textContent = `записано в ${colName(sel.c)}${sel.r + 1} за ${(performance.now() - t0).toFixed(0)} мс`;
+  }
+  if (move) sel = {r: Math.min(sel.r + 1, S.rows - 1), c: sel.c};
+  syncBar();
+  draw();
+}
+
+function syncBar() {
+  const cell = S && S.cells.get(sel.r * 65536 + sel.c);
+  document.getElementById('addr').textContent = colName(sel.c) + (sel.r + 1);
+  document.getElementById('formula').value = cell ? cell.text : '';
+}
+
+edit.addEventListener('keydown', e => {
+  if (!S) return;
+
+  if (editing) {
+    if (e.key === 'Enter') { e.preventDefault(); commitEdit(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); endEdit(); draw(); }
+    else if (e.key === 'Tab') {
+      e.preventDefault(); commitEdit(false);
+      sel.c = Math.min(sel.c + 1, S.cols - 1); syncBar(); draw();
+    }
+    return;
+  }
+
+  const step = {ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1]}[e.key];
+  if (step) {
+    e.preventDefault();
+    sel = {r: Math.max(0, Math.min(S.rows - 1, sel.r + step[0])),
+           c: Math.max(0, Math.min(S.cols - 1, sel.c + step[1]))};
+    syncBar(); draw(); return;
+  }
+  if (e.key === 'Enter' || e.key === 'F2') { e.preventDefault(); beginEdit(); return; }
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    e.preventDefault(); editing = true; edit.value = ''; commitEdit(false); return;
+  }
+  // Печатаемый символ начинает ввод, затирая старое значение — как в Excel.
+  // Событие не гасим: символ должен попасть в это же поле сам.
+  if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) beginEdit('');
+});
+
+// Страховка на случай, когда текст приходит не по нажатию клавиши: вставка из
+// буфера, ввод через IME, автоматизация. Тогда keydown не срабатывает, а текст
+// в поле уже есть — и без этого он молча пропал бы.
+edit.addEventListener('input', () => {
+  if (!editing && edit.value !== '') {
+    const typed = edit.value;
+    beginEdit('');
+    edit.value = typed;
+    edit.setSelectionRange(typed.length, typed.length);
+  }
+});
+
+cv.addEventListener('dblclick', () => beginEdit());
+
+document.getElementById('formula').addEventListener('keydown', e => {
+  if (e.key !== 'Enter') return;
+  editing = true;
+  edit.value = e.target.value;
+  commitEdit(false);
+});
+
+document.getElementById('save').onclick = () => {
+  const bytes = W.save();
+  if (!bytes.length) { status.textContent = 'нечего сохранять'; return; }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([bytes], {type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));
+  a.download = fileName.replace(/\.xlsx$/i, '') + ' (правка).xlsx';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  status.textContent = `сохранено ${bytes.length} байт`;
+};
 
 document.getElementById('grid').onclick = () => { showGrid = !showGrid; draw(); };
 addEventListener('resize', draw);
@@ -338,6 +485,9 @@ async function load(bytes, name) {
   S = parseSheet(W.sheet(0));
   geometry();
   scroll = {x: 0, y: 0}; sel = {r: 0, c: 0};
+  fileName = name;
+  edit.focus();
+  syncBar();
   draw();
   status.textContent = `${name} · ${S.cells.size} ячеек · ${ST.length} стилей · ${(performance.now() - t0).toFixed(0)} мс`;
 }

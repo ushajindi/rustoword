@@ -361,3 +361,84 @@ fn border_code(s: ooxml::xlsx::BorderStyle) -> u8 {
         B::Dotted => 6,
     }
 }
+
+/// Записывает значение в ячейку и сразу пересобирает файл.
+///
+/// `ptr`/`len` — введённый текст в UTF-8. Пустая строка очищает ячейку.
+/// Текст, разбирающийся как число, пишется числом — так же, как это делает
+/// сам Excel при вводе.
+///
+/// Файл пересобирается на каждую правку целиком. Это выглядит расточительно,
+/// но на деле стоит единицы миллисекунд и снимает главный источник ошибок:
+/// состояние всегда ровно одно — байты файла. Держать открытую книгу между
+/// вызовами нельзя технически (она заимствует эти байты), а копить правки в
+/// стороне значило бы завести второй источник истины.
+///
+/// Возвращает 1 при успехе, 0 при ошибке.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ooxml_set(sheet: u32, row: u32, col: u32, ptr: u32, len: u32) -> u32 {
+    let text = if len == 0 {
+        String::new()
+    } else {
+        // SAFETY: буфер выдан `ooxml_alloc`, длина та же.
+        let raw = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
+        match core::str::from_utf8(raw) {
+            Ok(s) => s.to_owned(),
+            Err(_) => return fail("значение не UTF-8") as u32,
+        }
+    };
+
+    let Some(st) = state() else { return 0 };
+    let bytes = mem::take(&mut st.bytes);
+    match apply_edit(&bytes, sheet as usize, row, col, &text) {
+        Ok(next) => {
+            st.bytes = next;
+            1
+        }
+        Err(e) => {
+            st.bytes = bytes;
+            st.error = e;
+            0
+        }
+    }
+}
+
+fn apply_edit(
+    bytes: &[u8],
+    sheet: usize,
+    row: u32,
+    col: u32,
+    text: &str,
+) -> Result<Vec<u8>, String> {
+    let mut wb = Workbook::open_with_limits(bytes, Limits::strict()).map_err(|e| e.to_string())?;
+    let at = ooxml::xlsx::CellRef::checked(row, col).map_err(|e| e.to_string())?;
+    {
+        let mut sh = wb.sheet(sheet).map_err(|e| e.to_string())?;
+        let t = text.trim();
+        if t.is_empty() {
+            sh.clear(at).map_err(|e| e.to_string())?;
+        } else if let Ok(v) = t.parse::<f64>() {
+            // `parse::<f64>` принимает "inf" и "nan"; в таблице это текст.
+            if v.is_finite() {
+                sh.set_number(at, v).map_err(|e| e.to_string())?;
+            } else {
+                sh.set_string(at, text).map_err(|e| e.to_string())?;
+            }
+        } else if t.eq_ignore_ascii_case("истина") || t.eq_ignore_ascii_case("true") {
+            sh.set_bool(at, true).map_err(|e| e.to_string())?;
+        } else if t.eq_ignore_ascii_case("ложь") || t.eq_ignore_ascii_case("false") {
+            sh.set_bool(at, false).map_err(|e| e.to_string())?;
+        } else {
+            sh.set_string(at, text).map_err(|e| e.to_string())?;
+        }
+    }
+    wb.save().map_err(|e| e.to_string())
+}
+
+/// Отдаёт текущие байты файла — для сохранения на диск.
+#[unsafe(no_mangle)]
+pub extern "C" fn ooxml_save() -> u64 {
+    let Some(st) = state() else { return 0 };
+    st.out = st.bytes.clone();
+    pack(st.out.as_ptr() as u32, st.out.len() as u32)
+}
