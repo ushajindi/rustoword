@@ -41,9 +41,11 @@ mod consts;
 mod entry;
 mod extra;
 mod reader;
+mod writer;
 mod zip64;
 
 pub use entry::{Descriptor, Eocd, RawEntry};
 pub use extra::{ExtraField, ExtraFields};
 pub use reader::ZipArchive;
+pub use writer::{EntrySource, WriteOptions, ZipWriter, repack_all_verbatim};
 pub use zip64::{Zip64Eocd, Zip64Layout, Zip64Locator};
