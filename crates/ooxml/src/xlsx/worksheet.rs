@@ -325,12 +325,26 @@ impl Sheet<'_, '_> {
     /// [`Error::Unsupported`] при кегле вне диапазона Excel (1..409) или если
     /// в книге нет `xl/styles.xml`; ошибки XML.
     pub fn set_font_size(&mut self, at: CellRef, points: f64) -> Result<()> {
+        self.set_font(at, Some(points), None)
+    }
+
+    /// Задаёт гарнитуру шрифта ячейки.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unsupported`] при пустом или слишком длинном имени; ошибки XML.
+    pub fn set_font_name(&mut self, at: CellRef, name: &str) -> Result<()> {
+        self.set_font(at, None, Some(name))
+    }
+
+    /// Общий путь правки шрифта. `None` означает «оставить как было».
+    fn set_font(&mut self, at: CellRef, points: Option<f64>, name: Option<&str>) -> Result<()> {
         check_ref(at)?;
         let current = self.get(at)?.and_then(|c| c.style);
 
         let style = {
             let doc = self.wb.styles_dom()?;
-            crate::xlsx::stylewrite::style_with_font_size(doc, current, points)?
+            crate::xlsx::stylewrite::style_with_font(doc, current, points, name)?
         };
 
         let i = self.at;

@@ -14,7 +14,9 @@ header .sp{flex:1}
 button,label.file{border:1px solid var(--line);background:#fff;border-radius:6px;padding:5px 10px;cursor:pointer;font:inherit}
 button:hover,label.file:hover{background:#f0f0ec}
 #addr{font-variant-numeric:tabular-nums;min-width:70px;padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:#fff}
-#size{padding:4px 6px;border:1px solid var(--line);border-radius:6px;background:#fff;font:inherit;min-width:76px}
+#size,#family{padding:4px 6px;border:1px solid var(--line);border-radius:6px;background:#fff;font:inherit}
+#size{min-width:76px}
+#family{min-width:170px}
 #formula{flex:1;padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:#fff;font-family:ui-monospace,monospace}
 #stage{flex:1;position:relative;overflow:hidden;background:#fff}
 canvas{position:absolute;inset:0;display:block}
@@ -33,6 +35,7 @@ footer{display:flex;gap:8px;align-items:center;padding:6px 12px;border-top:1px s
   <label class="file">Открыть<input type="file" accept=".xlsx" hidden id="pick"></label>
   <button id="save">Сохранить .xlsx</button>
   <span id="addr">A1</span>
+  <select id="family" title="шрифт"><option value="">шрифт</option></select>
   <select id="size" title="размер шрифта">
     <option value="">кегль</option>
   </select>
@@ -81,6 +84,14 @@ const W = {
   save() { return this.take(this.ex.ooxml_save()); },
   setFontSize(sheet, row, col, pt) {
     return this.ex.ooxml_set_font_size(sheet, row, col, pt) === 1;
+  },
+  setFontName(sheet, row, col, name) {
+    const b = new TextEncoder().encode(name);
+    const p = this.ex.ooxml_alloc(b.length);
+    this.mem().set(b, p);
+    const ok = this.ex.ooxml_set_font_name(sheet, row, col, p, b.length) === 1;
+    this.ex.ooxml_free(p, b.length);
+    return ok;
   },
 };
 
@@ -421,6 +432,11 @@ function syncBar() {
   const pt = currentSize();
   const box = document.getElementById('size');
   if (box) box.value = pt !== null && SIZES.includes(pt) ? String(pt) : '';
+  const cellSt = cell && ST[cell.style];
+  const fam = cellSt && cellSt.font ? cellSt.font : '';
+  if (familyBox) {
+    familyBox.value = [...familyBox.options].some(o => o.value === fam) ? fam : '';
+  }
 }
 
 edit.addEventListener('keydown', e => {
@@ -488,6 +504,78 @@ document.getElementById('save').onclick = () => {
 // Ряд Excel плюс промежуточные значения: свои числа задаются вводом с
 // клавиатуры в том же поле, поэтому список не обязан быть исчерпывающим.
 const SIZES = [6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72];
+
+// ------------------------------------------------------------------ шрифты
+// Ни один шрифт не встраивается: берём то, что уже стоит в системе. Иначе
+// страница потяжелела бы на мегабайты ради начертаний, которые у пользователя
+// и так есть.
+const familyBox = document.getElementById('family');
+
+/// Кандидаты для проверки, когда точного списка системе выдать нечем.
+/// Сюда входят и шрифты, которыми набраны офисные документы в наших краях.
+const PROBE = ['Arial', 'Arial Narrow', 'Calibri', 'Cambria', 'Candara', 'Consolas',
+  'Constantia', 'Corbel', 'Courier New', 'Franklin Gothic', 'Georgia', 'Helvetica',
+  'Impact', 'Lucida Console', 'Menlo', 'Monaco', 'PT Astra Serif', 'PT Sans', 'PT Serif',
+  'Palatino', 'Segoe UI', 'Tahoma', 'Times New Roman', 'Trebuchet MS', 'Verdana'];
+
+/// Собирает список доступных гарнитур.
+///
+/// Точный список даёт `queryLocalFonts()`, но он требует явного разрешения
+/// пользователя и есть не везде. Поэтому по умолчанию — проверка кандидатов
+/// через `document.fonts.check`: она отвечает, доступна ли гарнитура, не
+/// загружая её.
+async function loadFamilies(exact) {
+  let names = [];
+  if (exact && window.queryLocalFonts) {
+    try {
+      const list = await window.queryLocalFonts();
+      names = [...new Set(list.map(f => f.family))].sort((a, b) => a.localeCompare(b, 'ru'));
+    } catch { /* отказ в разрешении — молча остаёмся на проверке кандидатов */ }
+  }
+  if (!names.length) {
+    names = PROBE.filter(n => document.fonts.check(`12px "${n}"`));
+  }
+  familyBox.innerHTML = '<option value="">шрифт</option>';
+  for (const n of names) {
+    const o = document.createElement('option');
+    o.value = n; o.textContent = n; o.style.fontFamily = `"${n}", sans-serif`;
+    familyBox.appendChild(o);
+  }
+  if (window.queryLocalFonts && !exact) {
+    const o = document.createElement('option');
+    o.value = '__all__'; o.textContent = '— все шрифты системы…';
+    familyBox.appendChild(o);
+  }
+  return names.length;
+}
+
+async function applyFamily(name) {
+  if (!S) return;
+  const t0 = performance.now();
+  if (!W.setFontName(sheetIndex, sel.r, sel.c, name)) {
+    status.textContent = 'шрифт не изменён: ' + W.error();
+    return;
+  }
+  ST = parseStyles(W.styles());
+  S = parseSheet(W.sheet(sheetIndex));
+  geometry();
+  status.textContent = `шрифт ${name} в ${colName(sel.c)}${sel.r + 1} за ${(performance.now() - t0).toFixed(0)} мс`;
+  syncBar();
+  draw();
+}
+
+familyBox.addEventListener('change', async () => {
+  const v = familyBox.value;
+  if (v === '__all__') {
+    // Полный список системы требует разрешения, а его можно спросить только
+    // из обработчика действия пользователя — отсюда и пункт меню.
+    const n = await loadFamilies(true);
+    status.textContent = `шрифтов доступно: ${n}`;
+    return;
+  }
+  if (v) applyFamily(v);
+  edit.focus();
+});
 const sizeBox = document.getElementById('size');
 for (const v of SIZES) {
   const o = document.createElement('option');
@@ -566,6 +654,7 @@ document.getElementById('pick').onchange = async e => {
   try {
     await W.init('ooxml_wasm.wasm');
     status.textContent = 'модуль загружен';
+    await loadFamilies(false);
     const r = await fetch('sample.xlsx');
     if (r.ok) load(new Uint8Array(await r.arrayBuffer()), 'sample.xlsx');
   } catch (e) { status.textContent = 'wasm не загрузился: ' + e.message; }

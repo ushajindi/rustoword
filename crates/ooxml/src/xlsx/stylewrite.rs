@@ -45,10 +45,19 @@ fn fingerprint(doc: &Document, n: NodeId) -> Result<String> {
     String::from_utf8(bytes).map_err(|_| Error::Unsupported("styles: не UTF-8"))
 }
 
-/// Обеспечивает наличие шрифта, отличающегося от `font_id` только кеглем.
+/// Обеспечивает наличие шрифта, отличающегося от `font_id` заданными полями.
+///
+/// `None` означает «оставить как было»: так одной функцией меняется и кегль,
+/// и гарнитура, и обе сразу.
 ///
 /// Возвращает номер шрифта: существующего, если такой уже есть, иначе нового.
-fn ensure_font(doc: &mut Document, fonts: NodeId, font_id: u32, size_pt: f64) -> Result<u32> {
+fn ensure_font(
+    doc: &mut Document,
+    fonts: NodeId,
+    font_id: u32,
+    size_pt: Option<f64>,
+    name: Option<&str>,
+) -> Result<u32> {
     let list = children_named(doc, fonts, "font");
     let base = list
         .get(font_id as usize)
@@ -57,12 +66,23 @@ fn ensure_font(doc: &mut Document, fonts: NodeId, font_id: u32, size_pt: f64) ->
         .ok_or(Error::Unsupported("styles: нет ни одного шрифта"))?;
 
     let clone = doc.clone_subtree(base)?;
-    match child(doc, clone, "sz") {
-        Some(sz) => doc.set_attr(sz, "val", &format_size(size_pt))?,
-        None => {
-            let sz = doc.new_element("sz")?;
-            doc.set_attr(sz, "val", &format_size(size_pt))?;
-            doc.append_child(clone, sz)?;
+
+    if let Some(pt) = size_pt {
+        set_child_val(doc, clone, "sz", &format_size(pt))?;
+    }
+    if let Some(n) = name {
+        // Гарнитура хранится в `<name>`, но у шрифтов из рич-текста тот же
+        // смысл несёт `<rFont>`. Правим тот элемент, который есть.
+        let tag = if child(doc, clone, "name").is_some() || child(doc, clone, "rFont").is_none() {
+            "name"
+        } else {
+            "rFont"
+        };
+        set_child_val(doc, clone, tag, n)?;
+        // `<scheme val="minor"/>` привязывает шрифт к теме и перебивает имя:
+        // Excel подставит шрифт темы, и правка окажется невидимой.
+        if let Some(sc) = child(doc, clone, "scheme") {
+            doc.remove(sc)?;
         }
     }
 
@@ -111,6 +131,18 @@ fn ensure_xf(doc: &mut Document, cell_xfs: NodeId, xf_id: u32, font_id: u32) -> 
     u32::try_from(list.len()).map_err(|_| Error::Unsupported("styles: слишком много форматов"))
 }
 
+/// Задаёт `<тег val="…"/>` внутри узла, заводя элемент при необходимости.
+fn set_child_val(doc: &mut Document, parent: NodeId, tag: &str, val: &str) -> Result<()> {
+    match child(doc, parent, tag) {
+        Some(n) => doc.set_attr(n, "val", val),
+        None => {
+            let n = doc.new_element(tag)?;
+            doc.set_attr(n, "val", val)?;
+            doc.append_child(parent, n)
+        }
+    }
+}
+
 /// Увеличивает атрибут `count` на единицу, если он есть.
 ///
 /// Атрибут необязателен, но если он есть и врёт, Excel сообщает о повреждении
@@ -141,15 +173,26 @@ fn format_size(pt: f64) -> String {
 /// # Errors
 ///
 /// Ошибки XML; [`Error::Unsupported`], если структура `styles.xml` неожиданная.
-pub(crate) fn style_with_font_size(
+pub(crate) fn style_with_font(
     doc: &mut Document,
     style: Option<u32>,
-    size_pt: f64,
+    size_pt: Option<f64>,
+    name: Option<&str>,
 ) -> Result<u32> {
-    if !(1.0..=409.0).contains(&size_pt) {
+    if let Some(pt) = size_pt
+        && !(1.0..=409.0).contains(&pt)
+    {
         // Пределы самого Excel. Молча зажать значение нельзя: пользователь
         // увидит не то, что ввёл, и решит, что правка не сработала.
         return Err(Error::Unsupported("styles: кегль вне диапазона 1..409"));
+    }
+    if let Some(n) = name
+        && (n.trim().is_empty() || n.len() > 31)
+    {
+        // 31 символ — предел Excel на имя гарнитуры.
+        return Err(Error::Unsupported(
+            "styles: имя шрифта пустое или длиннее 31",
+        ));
     }
 
     let root = doc.root_element()?;
@@ -165,7 +208,7 @@ pub(crate) fn style_with_font_size(
         .and_then(|v| v.trim().parse::<u32>().ok())
         .unwrap_or(0);
 
-    let font_id = ensure_font(doc, fonts, base_font, size_pt)?;
+    let font_id = ensure_font(doc, fonts, base_font, size_pt, name)?;
     ensure_xf(doc, cell_xfs, xf_id, font_id)
 }
 
@@ -191,7 +234,7 @@ mod tests {
     #[test]
     fn new_size_adds_one_font_and_one_format() {
         let mut d = doc();
-        let s = style_with_font_size(&mut d, Some(0), 18.0).unwrap();
+        let s = style_with_font(&mut d, Some(0), Some(18.0), None).unwrap();
         assert_eq!(s, 2, "должна появиться третья запись формата");
         let out = String::from_utf8(d.serialize().unwrap()).unwrap();
         assert!(out.contains(r#"<sz val="18"/>"#), "{out}");
@@ -207,8 +250,8 @@ mod tests {
         // Без дедупликации каждое нажатие «увеличить кегль» дописывало бы
         // запись; за полчаса правки файл распух бы на тысячи стилей.
         let mut d = doc();
-        let a = style_with_font_size(&mut d, Some(0), 18.0).unwrap();
-        let b = style_with_font_size(&mut d, Some(0), 18.0).unwrap();
+        let a = style_with_font(&mut d, Some(0), Some(18.0), None).unwrap();
+        let b = style_with_font(&mut d, Some(0), Some(18.0), None).unwrap();
         assert_eq!(a, b);
         let out = String::from_utf8(d.serialize().unwrap()).unwrap();
         assert_eq!(
@@ -228,7 +271,7 @@ mod tests {
         // Кегль 14 уже есть у второго шрифта, но с жирным начертанием —
         // значит совпадением он не считается, шрифт всё равно новый.
         let mut d = doc();
-        style_with_font_size(&mut d, Some(0), 14.0).unwrap();
+        style_with_font(&mut d, Some(0), Some(14.0), None).unwrap();
         let out = String::from_utf8(d.serialize().unwrap()).unwrap();
         assert_eq!(out.matches("<font>").count(), 3, "{out}");
     }
@@ -237,17 +280,68 @@ mod tests {
     fn other_properties_survive() {
         // Меняем кегль у жирного шрифта: жирность обязана остаться.
         let mut d = doc();
-        let s = style_with_font_size(&mut d, Some(1), 20.0).unwrap();
+        let s = style_with_font(&mut d, Some(1), Some(20.0), None).unwrap();
         let out = String::from_utf8(d.serialize().unwrap()).unwrap();
         assert!(out.contains(r#"<b/><sz val="20"/>"#), "{out}");
         assert!(s >= 2);
     }
 
     #[test]
+    fn font_name_is_applied_and_deduplicated() {
+        let mut d = doc();
+        let a = style_with_font(&mut d, Some(0), None, Some("Georgia")).unwrap();
+        let b = style_with_font(&mut d, Some(0), None, Some("Georgia")).unwrap();
+        assert_eq!(a, b, "повтор той же гарнитуры не должен плодить записи");
+        let out = String::from_utf8(d.serialize().unwrap()).unwrap();
+        assert!(out.contains(r#"<name val="Georgia"/>"#), "{out}");
+        assert_eq!(out.matches("<font>").count(), 3, "{out}");
+    }
+
+    #[test]
+    fn name_and_size_change_together_in_one_font() {
+        let mut d = doc();
+        style_with_font(&mut d, Some(0), Some(16.0), Some("Georgia")).unwrap();
+        let out = String::from_utf8(d.serialize().unwrap()).unwrap();
+        assert!(
+            out.contains(r#"<name val="Georgia"/><sz val="16"/>"#),
+            "{out}"
+        );
+        // Ровно один новый шрифт, а не два.
+        assert_eq!(out.matches("<font>").count(), 3, "{out}");
+    }
+
+    #[test]
+    fn theme_scheme_is_dropped_when_the_family_changes() {
+        // `<scheme val="minor"/>` привязывает шрифт к теме и перебивает имя:
+        // Excel подставил бы шрифт темы, и правка стала бы невидимой.
+        const WITH_SCHEME: &[u8] = br#"<?xml version="1.0"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<fonts count="1"><font><sz val="11"/><name val="Calibri"/><scheme val="minor"/></font></fonts>
+<cellXfs count="1"><xf fontId="0"/></cellXfs>
+</styleSheet>"#;
+        let mut d = Document::parse(WITH_SCHEME.to_vec(), &Limits::strict()).unwrap();
+        style_with_font(&mut d, Some(0), None, Some("Georgia")).unwrap();
+        let out = String::from_utf8(d.serialize().unwrap()).unwrap();
+        assert!(out.contains(r#"<name val="Georgia"/>"#), "{out}");
+        assert_eq!(
+            out.matches("<scheme").count(),
+            1,
+            "у нового шрифта scheme остался: {out}"
+        );
+    }
+
+    #[test]
+    fn absurd_name_is_rejected_loudly() {
+        let mut d = doc();
+        assert!(style_with_font(&mut d, None, None, Some("")).is_err());
+        assert!(style_with_font(&mut d, None, None, Some(&"x".repeat(32))).is_err());
+    }
+
+    #[test]
     fn absurd_size_is_rejected_loudly() {
         let mut d = doc();
-        assert!(style_with_font_size(&mut d, Some(0), 0.0).is_err());
-        assert!(style_with_font_size(&mut d, Some(0), 500.0).is_err());
+        assert!(style_with_font(&mut d, Some(0), Some(0.0), None).is_err());
+        assert!(style_with_font(&mut d, Some(0), Some(500.0), None).is_err());
         // Отказ не должен ничего дописать.
         let out = String::from_utf8(d.serialize().unwrap()).unwrap();
         assert_eq!(out.matches("<font>").count(), 2, "{out}");

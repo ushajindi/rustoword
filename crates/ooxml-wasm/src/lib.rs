@@ -472,3 +472,46 @@ pub extern "C" fn ooxml_set_font_size(sheet: u32, row: u32, col: u32, points: f6
         }
     }
 }
+
+/// Задаёт гарнитуру шрифта ячейки. `ptr`/`len` — имя в UTF-8.
+///
+/// Возвращает 1 при успехе, 0 при ошибке.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ooxml_set_font_name(
+    sheet: u32,
+    row: u32,
+    col: u32,
+    ptr: u32,
+    len: u32,
+) -> u32 {
+    // SAFETY: буфер выдан `ooxml_alloc` с этой же длиной.
+    let raw = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let Ok(name) = core::str::from_utf8(raw) else {
+        return fail("имя шрифта не UTF-8") as u32;
+    };
+    let name = name.to_owned();
+
+    let Some(st) = state() else { return 0 };
+    let bytes = mem::take(&mut st.bytes);
+    let result = (|| -> Result<Vec<u8>, String> {
+        let mut wb =
+            Workbook::open_with_limits(&bytes, Limits::strict()).map_err(|e| e.to_string())?;
+        let at = ooxml::xlsx::CellRef::checked(row, col).map_err(|e| e.to_string())?;
+        wb.sheet(sheet as usize)
+            .map_err(|e| e.to_string())?
+            .set_font_name(at, &name)
+            .map_err(|e| e.to_string())?;
+        wb.save().map_err(|e| e.to_string())
+    })();
+    match result {
+        Ok(next) => {
+            st.bytes = next;
+            1
+        }
+        Err(e) => {
+            st.bytes = bytes;
+            st.error = e;
+            0
+        }
+    }
+}
