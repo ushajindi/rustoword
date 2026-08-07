@@ -36,8 +36,12 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod bytes;
+pub mod deflate;
 pub mod error;
+pub mod hash;
 pub mod limits;
+pub mod xml;
+pub mod zip;
 
 pub use error::{Error, Result};
 pub use limits::Limits;
