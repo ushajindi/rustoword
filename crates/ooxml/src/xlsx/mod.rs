@@ -81,7 +81,8 @@ pub(crate) mod recalc;
 pub mod appearance;
 
 pub use appearance::{
-    Appearance, BorderStyle, Borders, Color, Edge, Fill, Font, HAlign, VAlign, Xf,
+    Appearance, BorderStyle, Borders, Color, Edge, Fill, Font, HAlign, VAlign, Xf, col_width_px,
+    max_digit_width, row_height_px,
 };
 pub use cell::{Cell, CellError, CellType, CellValue, Formula, FormulaKind};
 pub use refs::{COLS, CellRange, CellRef, MAX_COL, MAX_ROW, ROWS};

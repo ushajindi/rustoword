@@ -27,27 +27,21 @@ use core::fmt::Write as _;
 use crate::error::Result;
 use crate::xlsx::{Appearance, CellRange, CellValue, HAlign, SheetLayout, VAlign, Workbook};
 
-/// Ширина «нулевой» цифры шрифта по умолчанию, в пикселях.
+/// Ширина самой широкой цифры шрифта книги, в пикселях.
 ///
-/// Единица ширины столбца в Excel — не пиксель и не миллиметр, а ширина цифры
-/// шрифта книги. Для Calibri 11 это 7 px; отсюда и переводной коэффициент.
-/// Точное совпадение с Excel недостижимо (у нас нет его шрифтов), но без этого
-/// перевода бланк с колонками в 1,33 символа разъезжается в нечитаемую сетку.
-const PX_PER_CHAR: f64 = 7.0;
-/// Постоянная добавка на поля ячейки и линию сетки.
-const CELL_PADDING_PX: f64 = 5.0;
+/// Взято значение для Calibri 11 — им же Excel меряет стандартную сетку.
+/// Считать его по шрифту листа заманчиво, но своих метрик шрифтов у ядра нет,
+/// а замер по корпусу показал, что подстановка 6 px для Arial 10 уводит от
+/// эталонного рендера LibreOffice дальше (884 px против 945), чем эти 7 px
+/// (974 px, расхождение 3%).
+const MDW: f64 = 7.0;
 
-/// Ширина столбца Excel в пикселях.
 fn col_px(width: f64) -> f64 {
-    if width <= 0.0 {
-        return 0.0;
-    }
-    (width * PX_PER_CHAR + CELL_PADDING_PX).round()
+    crate::xlsx::col_width_px(width, MDW)
 }
 
-/// Высота строки: пункты в пиксели, 96 dpi против 72 pt на дюйм.
 fn row_px(points: f64) -> f64 {
-    (points * 4.0 / 3.0).round()
+    crate::xlsx::row_height_px(points)
 }
 
 /// Настройки вывода.
@@ -487,9 +481,9 @@ fn render_sheet(
     // Сетку рисуем только там, где её рисует Excel. Иначе бланк, у которого
     // `showGridLines="false"`, тонет в сплошной сетке, и все его рамки —
     // единственное, что делает форму формой, — перестают читаться.
-    let _ = write!(
+    let _ = writeln!(
         out,
-        "<div class=\"wrap\"><table class=\"{}\" style=\"width:{total_px}px\">\n",
+        "<div class=\"wrap\"><table class=\"{}\" style=\"width:{total_px}px\">",
         if show_grid { "grid" } else { "plain" }
     );
 

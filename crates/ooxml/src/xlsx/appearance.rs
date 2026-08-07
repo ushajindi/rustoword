@@ -470,6 +470,46 @@ enum Zone {
     CellXfs,
 }
 
+/// Ширина самой широкой цифры шрифта книги, в пикселях при 96 dpi.
+///
+/// Единица ширины столбца в Excel — не пиксель, а «сколько цифр помещается»,
+/// поэтому без этой величины перевод невозможен. Точные значения для типовых
+/// шрифтов: Calibri 11 — 7 px, Arial 10 — 6 px; отсюда и коэффициент.
+///
+/// Своих метрик шрифтов у ядра нет и быть не может, так что это оценка. Ошибка
+/// в ней бьёт по всей раскладке сразу: лист в 68 узких столбцов при MDW=7
+/// вместо 6 растягивается на 15% и перестаёт совпадать с оригиналом.
+#[must_use]
+pub fn max_digit_width(font_size_pt: f64) -> f64 {
+    if !font_size_pt.is_finite() || font_size_pt <= 0.0 {
+        return 7.0;
+    }
+    (font_size_pt * 0.62).round().max(2.0)
+}
+
+/// Переводит ширину столбца из единиц Excel в пиксели.
+///
+/// Ширина в единицах Excel — это «сколько цифр помещается» плюс поле ячейки.
+/// Отсюда `chars * MDW + 5`, где 5 px — два поля по 2 px и линия сетки.
+/// Обратное преобразование (пиксели в символы) выглядит иначе, и перепутать их
+/// легко: оно даёт для стандартных 8.43 символа 59 px вместо правильных 64.
+#[must_use]
+pub fn col_width_px(chars: f64, mdw: f64) -> f64 {
+    if !chars.is_finite() || chars <= 0.0 || mdw <= 0.0 {
+        return 0.0;
+    }
+    (chars * mdw + 5.0).round()
+}
+
+/// Переводит высоту строки из пунктов в пиксели: 96 dpi против 72 pt на дюйм.
+#[must_use]
+pub fn row_height_px(points: f64) -> f64 {
+    if !points.is_finite() || points <= 0.0 {
+        return 0.0;
+    }
+    (points * 4.0 / 3.0).round()
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
@@ -559,6 +599,26 @@ mod tests {
         assert_eq!(xf.h_align, HAlign::Center);
         assert_eq!(xf.v_align, VAlign::Top);
         assert!(xf.wrap);
+    }
+
+    #[test]
+    fn column_width_matches_the_spec_not_a_guess() {
+        // Опорные точки: стандартная ширина Excel и столбец бланка МВД.
+        assert_eq!(max_digit_width(10.0), 6.0);
+        assert_eq!(max_digit_width(11.0), 7.0);
+        // Стандартная ширина столбца Excel — ровно 64 px, это опорная точка.
+        assert_eq!(col_width_px(8.43, 7.0), 64.0);
+        // Столбец бланка МВД.
+        assert_eq!(col_width_px(1.332_031_25, 7.0), 14.0);
+        assert_eq!(col_width_px(1.332_031_25, 6.0), 13.0);
+    }
+
+    #[test]
+    fn degenerate_inputs_do_not_produce_nonsense() {
+        assert_eq!(col_width_px(0.0, 7.0), 0.0);
+        assert_eq!(col_width_px(f64::NAN, 7.0), 0.0);
+        assert_eq!(row_height_px(-1.0), 0.0);
+        assert_eq!(max_digit_width(0.0), 7.0);
     }
 
     #[test]

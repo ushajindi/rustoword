@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>ooxml — просмотр и правка</title>
+<style>
+:root{--chrome:#f7f7f5;--line:#dcdcd6;--ink:#1b1b19}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;font:13px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:var(--ink)}
+body{display:flex;flex-direction:column;background:var(--chrome)}
+header{display:flex;align-items:center;gap:12px;padding:8px 12px;border-bottom:1px solid var(--line);background:#fff}
+header b{font-size:14px}
+header .sp{flex:1}
+button,label.file{border:1px solid var(--line);background:#fff;border-radius:6px;padding:5px 10px;cursor:pointer;font:inherit}
+button:hover,label.file:hover{background:#f0f0ec}
+#addr{font-variant-numeric:tabular-nums;min-width:70px;padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:#fff}
+#formula{flex:1;padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:#fff;font-family:ui-monospace,monospace}
+#stage{flex:1;position:relative;overflow:hidden;background:#fff}
+canvas{position:absolute;inset:0;display:block}
+#edit{position:absolute;display:none;border:2px solid #1a73e8;padding:0 3px;font:inherit;outline:none;background:#fff;z-index:2}
+footer{display:flex;gap:8px;align-items:center;padding:6px 12px;border-top:1px solid var(--line);background:#fff}
+.tab{padding:4px 12px;border:1px solid var(--line);border-bottom:none;border-radius:6px 6px 0 0;background:#f0f0ec;cursor:pointer}
+.tab.on{background:#fff;font-weight:600}
+#status{margin-left:auto;color:#77776f;font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+<header>
+  <b>ooxml</b>
+  <label class="file">Открыть<input type="file" accept=".xlsx" hidden id="pick"></label>
+  <button id="save">Сохранить .xlsx</button>
+  <span id="addr">A1</span>
+  <input id="formula" placeholder="значение ячейки">
+  <span class="sp"></span>
+  <button id="grid">Сетка</button>
+</header>
+<div id="stage"><canvas id="cv"></canvas><input id="edit"></div>
+<footer><div id="tabs"></div><span id="status">модуль не загружен</span></footer>
+
+<script>
+// ---------------------------------------------------------------- мост в wasm
+// Никакого wasm-bindgen: ядро экспортирует голый C-ABI, а сложные ответы
+// отдаёт блоками в линейной памяти. Здесь только чтение этих блоков.
+const W = {
+  ex: null, mem: null,
+  async init(url) {
+    const {instance} = await WebAssembly.instantiateStreaming(fetch(url), {});
+    this.ex = instance.exports;
+    this.mem = () => new Uint8Array(this.ex.memory.buffer);
+  },
+  // Дескриптор: (ptr<<32)|len в одном u64.
+  take(desc) {
+    const ptr = Number(desc >> 32n), len = Number(desc & 0xffffffffn);
+    if (!ptr || !len) return new Uint8Array(0);
+    return this.mem().slice(ptr, ptr + len);
+  },
+  open(bytes) {
+    const p = this.ex.ooxml_alloc(bytes.length);
+    this.mem().set(bytes, p);
+    return this.ex.ooxml_open(p, bytes.length) === 1;
+  },
+  error() { return new TextDecoder().decode(this.take(this.ex.ooxml_error())); },
+  sheet(i) { return this.take(this.ex.ooxml_sheet(i)); },
+  styles() { return this.take(this.ex.ooxml_styles()); },
+};
+
+// ------------------------------------------------------- разбор блоков ядра
+class R {
+  constructor(b) { this.d = new DataView(b.buffer, b.byteOffset, b.byteLength); this.p = 0; this.b = b; }
+  u8() { return this.d.getUint8(this.p++); }
+  u32() { const v = this.d.getUint32(this.p, true); this.p += 4; return v; }
+  f32() { const v = this.d.getFloat32(this.p, true); this.p += 4; return v; }
+  str(n) { const s = new TextDecoder().decode(this.b.subarray(this.p, this.p + n)); this.p += n; return s; }
+}
+
+function parseSheet(buf) {
+  const r = new R(buf);
+  const rows = r.u32(), cols = r.u32();
+  const w = []; let n = r.u32(); for (let i = 0; i < n; i++) w.push(r.f32());
+  const h = []; n = r.u32(); for (let i = 0; i < n; i++) h.push(r.f32());
+  const merges = []; n = r.u32();
+  for (let i = 0; i < n; i++) merges.push({r0: r.u32(), c0: r.u32(), r1: r.u32(), c1: r.u32()});
+  const cells = new Map(); n = r.u32();
+  for (let i = 0; i < n; i++) {
+    const row = r.u32(), col = r.u32(), style = r.u32(), kind = r.u8(), len = r.u32();
+    cells.set(row * 65536 + col, {row, col, style, kind, text: r.str(len)});
+  }
+  return {rows, cols, w, h, merges, cells};
+}
+
+const BORDER = [null, 1, 2, 3, 3, 1, 1];
+const DASH = {5: [4, 2], 6: [1, 2]};
+const NO_COLOR = 0xFF000000;
+const css = v => v === NO_COLOR ? null : '#' + (v & 0xffffff).toString(16).padStart(6, '0');
+
+function parseStyles(buf) {
+  const r = new R(buf), out = [];
+  const n = r.u32();
+  for (let i = 0; i < n; i++) {
+    const flags = r.u8();
+    const s = {bold: !!(flags & 1), italic: !!(flags & 2), wrap: !!(flags & 4),
+               size: r.f32(), color: css(r.u32()), fill: css(r.u32()),
+               ha: r.u8(), va: r.u8(), b: []};
+    for (let k = 0; k < 4; k++) s.b.push({w: BORDER[r.u8()] || 0, c: css(r.u32())});
+    s.font = r.str(r.u8());
+    out.push(s);
+  }
+  return out;
+}
+
+// ------------------------------------------------------------------ отрисовка
+const HEAD_W = 44, HEAD_H = 22;
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const stage = document.getElementById('stage'), edit = document.getElementById('edit');
+let S = null, ST = [], scroll = {x: 0, y: 0}, sel = {r: 0, c: 0}, showGrid = true;
+let xs = [], ys = [], covered = new Set(), spans = new Map();
+
+const colName = c => { let s = ''; for (;;) { s = String.fromCharCode(65 + c % 26) + s; if (c < 26) break; c = Math.floor(c / 26) - 1; } return s; };
+
+function geometry() {
+  xs = [0]; for (let c = 0; c < S.cols; c++) xs.push(xs[c] + (S.w[c] || 64));
+  ys = [0]; for (let r = 0; r < S.rows; r++) ys.push(ys[r] + (S.h[r] || 20));
+  covered = new Set(); spans = new Map();
+  for (const m of S.merges) {
+    spans.set(m.r0 * 65536 + m.c0, m);
+    for (let r = m.r0; r <= m.r1; r++)
+      for (let c = m.c0; c <= m.c1; c++)
+        if (r !== m.r0 || c !== m.c0) covered.add(r * 65536 + c);
+  }
+}
+
+function draw() {
+  const dpr = devicePixelRatio || 1;
+  const W_ = stage.clientWidth, H_ = stage.clientHeight;
+  cv.width = W_ * dpr; cv.height = H_ * dpr;
+  cv.style.width = W_ + 'px'; cv.style.height = H_ + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W_, H_);
+  if (!S) return;
+
+  const ox = HEAD_W - scroll.x, oy = HEAD_H - scroll.y;
+
+  // Видимый диапазон: рисуем только его — на листе в миллион строк полный
+  // обход занял бы секунды на каждый кадр.
+  let c0 = 0; while (c0 < S.cols && xs[c0 + 1] + ox < HEAD_W) c0++;
+  let c1 = c0; while (c1 < S.cols && xs[c1] + ox < W_) c1++;
+  let r0 = 0; while (r0 < S.rows && ys[r0 + 1] + oy < HEAD_H) r0++;
+  let r1 = r0; while (r1 < S.rows && ys[r1] + oy < H_) r1++;
+
+  ctx.save();
+  ctx.beginPath(); ctx.rect(HEAD_W, HEAD_H, W_ - HEAD_W, H_ - HEAD_H); ctx.clip();
+
+  // заливки
+  for (let r = r0; r < r1; r++) for (let c = c0; c < c1; c++) {
+    const k = r * 65536 + c; if (covered.has(k)) continue;
+    const cell = S.cells.get(k); if (!cell) continue;
+    const st = ST[cell.style]; if (!st || !st.fill) continue;
+    const sp = spans.get(k);
+    const x = xs[c] + ox, y = ys[r] + oy;
+    const w = (sp ? xs[Math.min(sp.c1 + 1, S.cols)] : xs[c + 1]) + ox - x;
+    const h = (sp ? ys[Math.min(sp.r1 + 1, S.rows)] : ys[r + 1]) + oy - y;
+    ctx.fillStyle = st.fill; ctx.fillRect(x, y, w, h);
+  }
+
+  // сетка листа
+  if (showGrid) {
+    ctx.strokeStyle = '#e8e8e2'; ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let c = c0; c <= c1 && c <= S.cols; c++) { const x = Math.round(xs[c] + ox) + .5; ctx.moveTo(x, HEAD_H); ctx.lineTo(x, H_); }
+    for (let r = r0; r <= r1 && r <= S.rows; r++) { const y = Math.round(ys[r] + oy) + .5; ctx.moveTo(HEAD_W, y); ctx.lineTo(W_, y); }
+    ctx.stroke();
+  }
+
+  // текст и рамки
+  for (let r = r0; r < r1; r++) for (let c = c0; c < c1; c++) {
+    const k = r * 65536 + c; if (covered.has(k)) continue;
+    const cell = S.cells.get(k);
+    const st = cell ? ST[cell.style] : null;
+    const sp = spans.get(k);
+    const x = xs[c] + ox, y = ys[r] + oy;
+    const w = (sp ? xs[Math.min(sp.c1 + 1, S.cols)] : xs[c + 1]) + ox - x;
+    const h = (sp ? ys[Math.min(sp.r1 + 1, S.rows)] : ys[r + 1]) + oy - y;
+
+    if (st) {
+      const sides = [[st.b[0], x, y, x, y + h], [st.b[1], x + w, y, x + w, y + h],
+                     [st.b[2], x, y, x + w, y], [st.b[3], x, y + h, x + w, y + h]];
+      for (const [b, x1, y1, x2, y2] of sides) {
+        if (!b.w) continue;
+        ctx.strokeStyle = b.c || '#000'; ctx.lineWidth = b.w;
+        ctx.setLineDash(DASH[b.w] || []);
+        ctx.beginPath(); ctx.moveTo(Math.round(x1) + .5, Math.round(y1) + .5);
+        ctx.lineTo(Math.round(x2) + .5, Math.round(y2) + .5); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+    if (!cell || !cell.text) continue;
+
+    const size = st ? st.size : 15;
+    ctx.font = `${st && st.italic ? 'italic ' : ''}${st && st.bold ? '700 ' : ''}${size}px ${st && st.font ? `'${st.font}',` : ''}serif`;
+    ctx.fillStyle = (st && st.color) || '#111';
+    // Числа по правому краю, текст по левому — если стиль не сказал иначе.
+    const ha = st && st.ha ? st.ha : (cell.kind === 1 ? 3 : 1);
+    ctx.textAlign = ha === 2 ? 'center' : ha === 3 ? 'right' : 'left';
+    ctx.textBaseline = 'alphabetic';
+    const tx = ha === 2 ? x + w / 2 : ha === 3 ? x + w - 3 : x + 3;
+    const va = st ? st.va : 2;
+
+    if (st && st.wrap) {
+      const lines = wrapText(cell.text, w - 6, size);
+      const lh = size * 1.15;
+      let ty = va === 0 ? y + lh : va === 1 ? y + (h - lines.length * lh) / 2 + lh : y + h - (lines.length - 1) * lh - 4;
+      ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+      for (const ln of lines) { ctx.fillText(ln, tx, ty); ty += lh; }
+      ctx.restore();
+    } else {
+      // Базовая линия прижимается к низу ячейки, но не выше её верха:
+      // при строке в 4 px шрифт в 15 px иначе рисуется поверх соседних.
+      const pad = Math.min(3, Math.max(0, (h - size) / 2));
+      const ty = va === 0 ? Math.min(y + size, y + h - pad)
+               : va === 1 ? y + h / 2 + size * .35
+               : y + h - pad;
+      // Excel даёт тексту вытекать в соседние пустые ячейки — и вправо, и
+      // влево. Направление задаёт выравнивание: текст, прижатый вправо,
+      // вытекает влево. Без этого «ФОРМА 1» обрезается до «1».
+      let left = 0, right = 0;
+      const busy = (rr, cc) => S.cells.get(rr * 65536 + cc) || covered.has(rr * 65536 + cc);
+      if (ha !== 3) for (let cc = c + 1; cc < S.cols && !busy(r, cc); cc++) right += xs[cc + 1] - xs[cc];
+      if (ha !== 1) for (let cc = c - 1; cc >= 0 && !busy(r, cc); cc--) left += xs[cc + 1] - xs[cc];
+      // Клип по вертикали строгий, по горизонтали — до первой занятой ячейки.
+      ctx.save(); ctx.beginPath();
+      ctx.rect(x - left, y, w + left + right, h);
+      ctx.clip();
+      ctx.fillText(cell.text, tx, ty);
+      ctx.restore();
+    }
+  }
+
+  // выделение
+  const sx = xs[sel.c] + ox, sy = ys[sel.r] + oy;
+  const ssp = spans.get(sel.r * 65536 + sel.c);
+  const sw = (ssp ? xs[Math.min(ssp.c1 + 1, S.cols)] : xs[sel.c + 1]) + ox - sx;
+  const sh = (ssp ? ys[Math.min(ssp.r1 + 1, S.rows)] : ys[sel.r + 1]) + oy - sy;
+  ctx.strokeStyle = '#1a73e8'; ctx.lineWidth = 2;
+  ctx.strokeRect(Math.round(sx) + 1, Math.round(sy) + 1, sw - 2, sh - 2);
+  ctx.restore();
+
+  // заголовки
+  ctx.fillStyle = '#f2f2ee'; ctx.fillRect(0, 0, W_, HEAD_H); ctx.fillRect(0, 0, HEAD_W, H_);
+  ctx.strokeStyle = '#d5d5cf'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, HEAD_H + .5); ctx.lineTo(W_, HEAD_H + .5);
+  ctx.moveTo(HEAD_W + .5, 0); ctx.lineTo(HEAD_W + .5, H_); ctx.stroke();
+  ctx.font = '11px -apple-system,sans-serif'; ctx.fillStyle = '#6b6b63';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  for (let c = c0; c < c1; c++) {
+    const x = xs[c] + ox, w = xs[c + 1] - xs[c];
+    if (w > 9) ctx.fillText(colName(c), x + w / 2, HEAD_H / 2);
+  }
+  for (let r = r0; r < r1; r++) {
+    const y = ys[r] + oy, h = ys[r + 1] - ys[r];
+    if (h > 9) ctx.fillText(String(r + 1), HEAD_W / 2, y + h / 2);
+  }
+}
+
+function wrapText(text, max, size) {
+  const out = [];
+  for (const para of text.split('\n')) {
+    let line = '';
+    for (const word of para.split(' ')) {
+      const t = line ? line + ' ' + word : word;
+      if (ctx.measureText(t).width > max && line) { out.push(line); line = word; } else line = t;
+    }
+    out.push(line);
+  }
+  return out;
+}
+
+// ------------------------------------------------------------ взаимодействие
+function hit(px, py) {
+  const x = px - HEAD_W + scroll.x, y = py - HEAD_H + scroll.y;
+  let c = 0; while (c < S.cols - 1 && xs[c + 1] <= x) c++;
+  let r = 0; while (r < S.rows - 1 && ys[r + 1] <= y) r++;
+  for (const m of S.merges) if (r >= m.r0 && r <= m.r1 && c >= m.c0 && c <= m.c1) return {r: m.r0, c: m.c0};
+  return {r, c};
+}
+
+stage.addEventListener('wheel', e => {
+  e.preventDefault();
+  scroll.x = Math.max(0, scroll.x + e.deltaX);
+  scroll.y = Math.max(0, scroll.y + e.deltaY);
+  draw();
+}, {passive: false});
+
+cv.addEventListener('mousedown', e => {
+  if (!S) return;
+  const b = cv.getBoundingClientRect();
+  const p = hit(e.clientX - b.left, e.clientY - b.top);
+  sel = p;
+  const cell = S.cells.get(p.r * 65536 + p.c);
+  document.getElementById('addr').textContent = colName(p.c) + (p.r + 1);
+  document.getElementById('formula').value = cell ? cell.text : '';
+  draw();
+});
+
+document.getElementById('grid').onclick = () => { showGrid = !showGrid; draw(); };
+addEventListener('resize', draw);
+
+// ------------------------------------------------------------------- загрузка
+const status = document.getElementById('status');
+async function load(bytes, name) {
+  status.textContent = 'разбор…';
+  if (!W.open(bytes)) { status.textContent = 'ошибка: ' + W.error(); return; }
+  const t0 = performance.now();
+  ST = parseStyles(W.styles());
+  S = parseSheet(W.sheet(0));
+  geometry();
+  scroll = {x: 0, y: 0}; sel = {r: 0, c: 0};
+  draw();
+  status.textContent = `${name} · ${S.cells.size} ячеек · ${ST.length} стилей · ${(performance.now() - t0).toFixed(0)} мс`;
+}
+
+document.getElementById('pick').onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  load(new Uint8Array(await f.arrayBuffer()), f.name);
+};
+
+(async () => {
+  try {
+    await W.init('ooxml_wasm.wasm');
+    status.textContent = 'модуль загружен';
+    const r = await fetch('sample.xlsx');
+    if (r.ok) load(new Uint8Array(await r.arrayBuffer()), 'sample.xlsx');
+  } catch (e) { status.textContent = 'wasm не загрузился: ' + e.message; }
+})();
+</script>
+</body>
+</html>

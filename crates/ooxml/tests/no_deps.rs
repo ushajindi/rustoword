@@ -41,7 +41,7 @@ fn lockfile_contains_only_workspace_members() {
 
     assert_eq!(
         sorted,
-        vec!["ooxml", "ooxml-cli", "xtask"],
+        vec!["ooxml", "ooxml-cli", "ooxml-wasm", "xtask"],
         "в Cargo.lock появилась внешняя зависимость: {names:?}.\n\
          Ноль зависимостей — архитектурное требование, а не рекомендация."
     );

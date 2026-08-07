@@ -715,7 +715,12 @@ pub fn scan_layout(part: &[u8], limits: &Limits) -> Result<SheetLayout> {
                         let Some(r) = attr_str(&rd, b"r")? else {
                             continue;
                         };
-                        let row = parse_row_number(r)?.saturating_sub(1);
+                        // `parse_row_number` уже возвращает нулевой индекс.
+                        // Вычесть здесь ещё единицу — значит сдвинуть все
+                        // высоты на строку вверх; текст поедет в чужие строки,
+                        // и выглядеть это будет как дефект отрисовки, хотя
+                        // сломан разбор.
+                        let row = parse_row_number(r)?;
                         if let Some(h) = attr_f64(&rd, b"ht")? {
                             out.row_heights.push((row, h));
                         }

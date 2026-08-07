@@ -14,5 +14,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ooxml-wasm"
+version = "0.1.0"
+dependencies = [
+ "ooxml",
+]
+
+[[package]]
 name = "xtask"
 version = "0.1.0"

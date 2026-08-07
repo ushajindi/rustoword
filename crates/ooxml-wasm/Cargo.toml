@@ -1,0 +1,30 @@
+[package]
+name = "ooxml-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Мост между ядром ooxml и браузером: C-ABI поверх wasm32, без wasm-bindgen."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ooxml = { path = "../ooxml" }
+
+# Единственный крейт вне общей политики линтов: границу C-ABI без `unsafe`
+# выразить нельзя, а `unsafe_code = "forbid"` из workspace переопределить
+# невозможно по определению `forbid`. Крейт намеренно тонкий — вся логика
+# живёт в `ooxml`, где запрет остаётся в силе.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+indexing_slicing = "deny"
