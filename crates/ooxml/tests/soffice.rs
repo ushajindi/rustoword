@@ -100,7 +100,7 @@ fn soffice_path() -> Option<PathBuf> {
 }
 
 /// Оракул или предупреждение. `None` означает «тест надо пропустить».
-fn oracle() -> Option<PathBuf> {
+pub(crate) fn oracle() -> Option<PathBuf> {
     let found = soffice_path();
     if found.is_none() {
         eprintln!(
@@ -278,7 +278,7 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<Output, Strin
 
 /// Во что конвертируем.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
+pub(crate) enum Kind {
     /// `.xlsx` → CSV фильтром StarCalc.
     Spreadsheet,
     /// `.docx` → plain text.
@@ -330,19 +330,19 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// Результат конвертации. Держит рабочий каталог живым: как только структура
 /// уничтожена, файл вывода исчезает вместе с каталогом.
 #[derive(Debug)]
-struct Conversion {
+pub(crate) struct Conversion {
     _workspace: Workspace,
     output: PathBuf,
 }
 
 impl Conversion {
-    fn output(&self) -> &Path {
+    pub(crate) fn output(&self) -> &Path {
         &self.output
     }
 }
 
 /// Гоняет файл через LibreOffice и возвращает путь к произведённому выводу.
-fn convert(soffice: &Path, input: &Path, kind: Kind) -> Result<Conversion, String> {
+pub(crate) fn convert(soffice: &Path, input: &Path, kind: Kind) -> Result<Conversion, String> {
     let workspace = Workspace::new("conv")?;
     let outdir = workspace.outdir();
 
@@ -398,7 +398,7 @@ fn convert(soffice: &Path, input: &Path, kind: Kind) -> Result<Conversion, Strin
 ///
 /// Нечитаемый или отсутствующий файл даёт пустой вектор: вызывающий тест
 /// всё равно проверяет непустоту и сообщит понятнее.
-fn read_reference_csv(path: &Path) -> Vec<Vec<String>> {
+pub(crate) fn read_reference_csv(path: &Path) -> Vec<Vec<String>> {
     let Ok(bytes) = std::fs::read(path) else {
         return Vec::new();
     };

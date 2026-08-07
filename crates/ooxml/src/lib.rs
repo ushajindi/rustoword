@@ -39,9 +39,11 @@ pub mod bytes;
 pub mod deflate;
 pub mod dom;
 pub mod error;
+pub mod formula;
 pub mod hash;
 pub mod limits;
 pub mod opc;
+pub mod xlsx;
 pub mod xml;
 pub mod zip;
 
