@@ -90,7 +90,7 @@ pub(crate) fn attr_str<'a>(rd: &Reader<'a>, name: &[u8]) -> Result<Option<&'a st
 ///
 /// Отсутствие namespace тоже принимается: рукотворные части в тестах пишутся
 /// без `xmlns`, а требовать его там — значит проверять не то, что нужно.
-fn in_sml(rd: &Reader<'_>) -> bool {
+pub(crate) fn in_sml(rd: &Reader<'_>) -> bool {
     rd.element_ns().is_none_or(|id| rd.uri(id) == Some(SML_NS))
 }
 
@@ -744,6 +744,36 @@ fn attr_f64(rd: &Reader<'_>, name: &[u8]) -> Result<Option<f64>> {
 /// Логический атрибут OOXML: истина — это `1` или `true`.
 fn attr_bool(rd: &Reader<'_>, name: &[u8]) -> bool {
     matches!(raw_attr(rd, name), Some(b"1" | b"true"))
+}
+
+/// Показывает ли Excel сетку на этом листе (`<sheetView showGridLines=>`).
+///
+/// Значение по умолчанию — истина, но у бланков оно снято, и это ключевой
+/// факт для показа документа: без сетки видны только рамки из стилей, а
+/// экспорт, рисующий границу у каждой ячейки, топит форму в сплошной сетке.
+///
+/// # Errors
+///
+/// Ошибки XML.
+pub fn sheet_shows_grid_lines(part: &[u8], limits: &Limits) -> Result<bool> {
+    let mut rd = Reader::with_limits(part, limits.clone());
+    loop {
+        match rd.next_event()? {
+            Event::Start { .. } => {
+                if local_name(&rd) == b"sheetView" && in_sml(&rd) {
+                    return Ok(!matches!(
+                        raw_attr(&rd, b"showGridLines"),
+                        Some(b"0" | b"false")
+                    ));
+                }
+                if local_name(&rd) == b"sheetData" && in_sml(&rd) {
+                    return Ok(true);
+                }
+            }
+            Event::Eof => return Ok(true),
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]

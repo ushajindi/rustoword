@@ -33,6 +33,7 @@ use crate::dom::Document;
 use crate::error::{Error, Result, XlsxError};
 use crate::limits::Limits;
 use crate::opc::{Package, PartName, TargetMode};
+use crate::xlsx::appearance::Appearance;
 use crate::xlsx::recalc;
 use crate::xlsx::sst::SharedStrings;
 use crate::xlsx::worksheet::{Sheet, StringPolicy, encode_x_escapes, find_child_named, prefixed};
@@ -311,6 +312,28 @@ impl<'a> Workbook<'a> {
     /// # Errors
     ///
     /// Ошибки распаковки, разбора таблицы строк и сериализации дерева.
+    /// Разбирает оформление книги из `xl/styles.xml`.
+    ///
+    /// Не кэшируется: оформление нужно только показу документа, а платить за
+    /// его разбор при каждом открытии книги незачем. Вызывающий, которому оно
+    /// нужно многократно, держит результат у себя.
+    ///
+    /// `Ok(None)` — части стилей в пакете нет; это допустимо.
+    ///
+    /// # Errors
+    ///
+    /// Ошибки распаковки и XML.
+    pub fn appearance(&mut self) -> Result<Option<Appearance>> {
+        let Ok(part) = PartName::new("/xl/styles.xml") else {
+            return Ok(None);
+        };
+        if !self.pkg.has(&part) {
+            return Ok(None);
+        }
+        let data = self.pkg.bytes(&part)?;
+        Appearance::parse(data, &self.limits).map(Some)
+    }
+
     pub(crate) fn with_sheet_bytes<R>(
         &mut self,
         i: usize,

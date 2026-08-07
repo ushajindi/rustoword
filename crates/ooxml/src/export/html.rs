@@ -25,7 +25,7 @@
 use core::fmt::Write as _;
 
 use crate::error::Result;
-use crate::xlsx::{CellRange, CellValue, SheetLayout, Workbook};
+use crate::xlsx::{Appearance, CellRange, CellValue, HAlign, SheetLayout, VAlign, Workbook};
 
 /// Ширина «нулевой» цифры шрифта по умолчанию, в пикселях.
 ///
@@ -152,6 +152,8 @@ struct Slot {
     class: &'static str,
     title: Option<String>,
     span: Option<(u32, u32)>,
+    /// Индекс в `cellXfs`. Из него получается класс оформления.
+    style: Option<u32>,
     /// Ячейка накрыта объединением сверху или слева — её не выводим вовсе.
     covered: bool,
 }
@@ -168,10 +170,11 @@ h1{font-size:20px;margin:0 0 4px}
 .sheet h2 .n{color:#6b6b66;font-weight:400;font-size:13px;margin-left:8px}
 .wrap{overflow-x:auto;border:1px solid #e0dfda;border-radius:6px;background:#fff}
 table{border-collapse:collapse;font-size:13px;table-layout:fixed}
-th,td{border:1px solid #eceae4;padding:2px 5px;overflow:hidden;text-overflow:ellipsis;
-white-space:nowrap;vertical-align:middle}
+th,td{padding:2px 5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+vertical-align:bottom}
+table.grid td{border:1px solid #eceae4}
 thead th,tbody th{background:#f5f4f0;color:#6b6b66;font-weight:500;text-align:center;
-position:sticky;top:0;z-index:1}
+border:1px solid #eceae4;position:sticky;top:0;z-index:1}
 tbody th{position:static;min-width:44px}
 td.n{text-align:right;font-variant-numeric:tabular-nums}
 td.s{text-align:left}
@@ -183,12 +186,96 @@ td.f::after{content:'ƒ';float:right;color:#b8b096;font-size:10px;margin-left:6p
 @media (prefers-color-scheme:dark){
 body{background:#191917;color:#e8e6e1}
 .wrap{border-color:#33322e;background:#1f1f1d}
-th,td{border-color:#2b2a27}
+table.grid td,thead th,tbody th{border-color:#2b2a27}
 thead th,tbody th{background:#252420;color:#98968f}
 td.f{background:#232219}
 td.e{color:#e08b7c}
 .meta,.sheet h2 .n{color:#98968f}
 }";
+
+/// Собирает CSS-классы по таблице стилей книги.
+///
+/// Класс на стиль, а не инлайновый `style` на ячейку: стилей в файле 127, а
+/// ячеек 7000, и разница в размере страницы получается кратной.
+fn style_classes(ap: &Appearance) -> String {
+    let mut css = String::new();
+    for i in 0..ap.xf_count() {
+        let idx = i as u32;
+        let mut decls = String::new();
+
+        if let Some(f) = ap.font_of(idx) {
+            if f.bold {
+                decls.push_str("font-weight:700;");
+            }
+            if f.italic {
+                decls.push_str("font-style:italic;");
+            }
+            if f.underline || f.strike {
+                let _ = write!(
+                    decls,
+                    "text-decoration:{}{};",
+                    if f.underline { "underline " } else { "" },
+                    if f.strike { "line-through" } else { "" }
+                );
+            }
+            if let Some(sz) = f.size {
+                let _ = write!(decls, "font-size:{}px;", (sz * 4.0 / 3.0).round());
+            }
+            if let Some(n) = &f.name {
+                let _ = write!(decls, "font-family:'{}',sans-serif;", n.replace('\'', ""));
+            }
+            if let Some(c) = f.color.and_then(super::super::xlsx::Color::to_css) {
+                let _ = write!(decls, "color:{c};");
+            }
+        }
+
+        if let Some(fill) = ap.fill_of(idx)
+            && let Some(c) = fill.solid.and_then(super::super::xlsx::Color::to_css)
+        {
+            let _ = write!(decls, "background:{c};");
+        }
+
+        if let Some(b) = ap.borders_of(idx) {
+            for (name, edge) in [
+                ("left", b.left),
+                ("right", b.right),
+                ("top", b.top),
+                ("bottom", b.bottom),
+            ] {
+                if let Some(line) = edge.style.to_css() {
+                    let c = edge
+                        .color
+                        .and_then(super::super::xlsx::Color::to_css)
+                        .unwrap_or_else(|| "currentColor".to_owned());
+                    let _ = write!(decls, "border-{name}:{line} {c};");
+                }
+            }
+        }
+
+        if let Some(xf) = ap.xf(idx) {
+            match xf.h_align {
+                HAlign::Left => decls.push_str("text-align:left;"),
+                HAlign::Center => decls.push_str("text-align:center;"),
+                HAlign::Right => decls.push_str("text-align:right;"),
+                HAlign::Justify => decls.push_str("text-align:justify;"),
+                HAlign::General => {}
+            }
+            match xf.v_align {
+                VAlign::Top => decls.push_str("vertical-align:top;"),
+                VAlign::Center => decls.push_str("vertical-align:middle;"),
+                VAlign::Bottom => decls.push_str("vertical-align:bottom;"),
+            }
+            if xf.wrap {
+                decls.push_str("white-space:normal;");
+            }
+        }
+
+        if !decls.is_empty() {
+            let _ = writeln!(css, ".x{idx}{{{decls}}}");
+        }
+    }
+    css
+}
 
 /// Превращает книгу в самодостаточную HTML-страницу.
 ///
@@ -205,6 +292,11 @@ pub fn workbook_to_html(wb: &mut Workbook<'_>, opts: &HtmlOptions) -> Result<Str
     escape(&opts.title, &mut out);
     out.push_str("</title>\n<style>");
     out.push_str(STYLE);
+    let appearance = wb.appearance()?;
+    if let Some(ap) = &appearance {
+        out.push('\n');
+        out.push_str(&style_classes(ap));
+    }
     out.push_str("</style>\n</head>\n<body>\n<h1>");
     escape(&opts.title, &mut out);
     out.push_str("</h1>\n");
@@ -230,6 +322,7 @@ pub fn workbook_to_html(wb: &mut Workbook<'_>, opts: &HtmlOptions) -> Result<Str
         let cells = sheet.read_all()?;
         let merges = sheet.merges()?;
         let layout = sheet.layout()?;
+        let grid = sheet.shows_grid_lines()?;
 
         out.push_str("<section class=\"sheet\">\n<h2>");
         escape(&name, &mut out);
@@ -240,7 +333,7 @@ pub fn workbook_to_html(wb: &mut Workbook<'_>, opts: &HtmlOptions) -> Result<Str
             plural_cells(cells.len())
         );
 
-        match render_sheet(&cells, &merges, &layout, opts) {
+        match render_sheet(&cells, &merges, &layout, grid, opts) {
             Some(table) => out.push_str(&table),
             None => out.push_str("<div class=\"wrap\"><p class=\"empty\">Лист пуст</p></div>\n"),
         }
@@ -267,6 +360,7 @@ fn render_sheet(
     cells: &[crate::xlsx::Cell],
     merges: &[CellRange],
     layout: &SheetLayout,
+    show_grid: bool,
     opts: &HtmlOptions,
 ) -> Option<String> {
     // Размах считается по фактическим данным, а не по объявленному
@@ -309,6 +403,7 @@ fn render_sheet(
         };
         slot.text = text;
         slot.class = class;
+        slot.style = cell.style;
         if let Some(f) = &cell.formula {
             slot.title = Some(format!("={}", f.text));
         }
@@ -342,7 +437,14 @@ fn render_sheet(
     }
 
     let mut out = String::with_capacity(rows.saturating_mul(cols).saturating_mul(24));
-    out.push_str("<div class=\"wrap\"><table>\n");
+    // Сетку рисуем только там, где её рисует Excel. Иначе бланк, у которого
+    // `showGridLines="false"`, тонет в сплошной сетке, и все его рамки —
+    // единственное, что делает форму формой, — перестают читаться.
+    out.push_str(if show_grid {
+        "<div class=\"wrap\"><table class=\"grid\">\n"
+    } else {
+        "<div class=\"wrap\"><table>\n"
+    });
 
     // Ширины объявлены в файле — переносим их. `table-layout:fixed` нужен,
     // чтобы браузер их слушался: при автоматической раскладке он растянет
@@ -390,6 +492,9 @@ fn render_sheet(
             let mut class = slot.class.to_owned();
             if slot.title.is_some() {
                 class.push_str(" f");
+            }
+            if let Some(sx) = slot.style {
+                let _ = write!(class, " x{sx}");
             }
             out.push_str("<td class=\"");
             out.push_str(&class);

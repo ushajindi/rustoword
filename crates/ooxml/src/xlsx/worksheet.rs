@@ -53,6 +53,7 @@ use crate::xlsx::cell::{Cell, CellError};
 use crate::xlsx::refs::{CellRange, CellRef, parse_row_number};
 use crate::xlsx::scan::{
     SML_NS, SheetLayout, scan_layout, scan_merges, scan_sheet, sheet_dimension,
+    sheet_shows_grid_lines,
 };
 use crate::xlsx::workbook::Workbook;
 
@@ -149,6 +150,17 @@ impl Sheet<'_, '_> {
         let i = self.at;
         self.wb
             .with_sheet_bytes(i, |data, _, limits| scan_layout(data, limits))
+    }
+
+    /// Показывает ли Excel сетку на этом листе.
+    ///
+    /// # Errors
+    ///
+    /// Ошибки распаковки и XML.
+    pub fn shows_grid_lines(&mut self) -> Result<bool> {
+        let i = self.at;
+        self.wb
+            .with_sheet_bytes(i, |data, _, limits| sheet_shows_grid_lines(data, limits))
     }
 
     /// Читает одну ячейку. `Ok(None)` — элемента `<c>` с таким адресом нет.
