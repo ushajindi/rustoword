@@ -5,3 +5,6 @@ target/
 crates/ooxml/tests/corpus/xlsx/
 crates/ooxml/tests/corpus/docx/
 crates/ooxml/tests/corpus/MANIFEST.tsv
+
+# IDE
+.idea/
