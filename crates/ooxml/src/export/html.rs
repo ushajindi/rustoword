@@ -170,26 +170,33 @@ h1{font-size:20px;margin:0 0 4px}
 .sheet h2 .n{color:#6b6b66;font-weight:400;font-size:13px;margin-left:8px}
 .wrap{overflow-x:auto;border:1px solid #e0dfda;border-radius:6px;background:#fff}
 table{border-collapse:collapse;font-size:13px;table-layout:fixed}
-th,td{padding:2px 5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-vertical-align:bottom}
+th,td{padding:1px 3px;white-space:nowrap;vertical-align:bottom;position:relative}
+/* Excel даёт тексту вытекать в соседние пустые ячейки, и заголовки листа на
+   этом держатся. Обрезка превратила бы «Настоящее уведомление...» в «Н». */
+td{overflow:visible}
+td.ww{overflow:hidden;white-space:normal}
+td.clip{overflow:hidden}
 table.grid td{border:1px solid #eceae4}
+/* Лист — это бумага: у неё свой цвет, заданный документом. Инвертировать её
+   в тёмной теме — то же самое, что печатать негатив. */
+.wrap{background:#fff;color:#111}
+.paper{background:#fff;color:#111}
 thead th,tbody th{background:#f5f4f0;color:#6b6b66;font-weight:500;text-align:center;
 border:1px solid #eceae4;position:sticky;top:0;z-index:1}
 tbody th{position:static;min-width:44px}
-td.n{text-align:right;font-variant-numeric:tabular-nums}
-td.s{text-align:left}
-td.b,td.e{text-align:center}
-td.e{color:#a3372a}
-td.f{background:#fcfbf5}
-td.f::after{content:'ƒ';float:right;color:#b8b096;font-size:10px;margin-left:6px}
+/* Типовое выравнивание — только запасной вариант. Селекторы намеренно
+   слабее, чем `.xN` со стилями книги: иначе они перебивали бы
+   выравнивание, заданное в самом документе. */
+.n{text-align:right;font-variant-numeric:tabular-nums}
+.s{text-align:left}
+.b,.e{text-align:center}
+.e{color:#a3372a}
+td.ff{background:#fcfbf5}
+td.ff::after{content:'ƒ';float:right;color:#b8b096;font-size:10px;margin-left:6px}
 .empty{color:#9a9a93;font-style:italic;padding:12px}
 @media (prefers-color-scheme:dark){
 body{background:#191917;color:#e8e6e1}
-.wrap{border-color:#33322e;background:#1f1f1d}
-table.grid td,thead th,tbody th{border-color:#2b2a27}
-thead th,tbody th{background:#252420;color:#98968f}
-td.f{background:#232219}
-td.e{color:#e08b7c}
+.wrap{border-color:#33322e}
 .meta,.sheet h2 .n{color:#98968f}
 }";
 
@@ -265,9 +272,9 @@ fn style_classes(ap: &Appearance) -> String {
                 VAlign::Center => decls.push_str("vertical-align:middle;"),
                 VAlign::Bottom => decls.push_str("vertical-align:bottom;"),
             }
-            if xf.wrap {
-                decls.push_str("white-space:normal;");
-            }
+            // Перенос по словам ставится классом `wrap` на самой ячейке:
+            // вместе с ним включается и обрезка, иначе перенесённый текст
+            // вылезал бы на строки ниже.
         }
 
         if !decls.is_empty() {
@@ -333,7 +340,7 @@ pub fn workbook_to_html(wb: &mut Workbook<'_>, opts: &HtmlOptions) -> Result<Str
             plural_cells(cells.len())
         );
 
-        match render_sheet(&cells, &merges, &layout, grid, opts) {
+        match render_sheet(&cells, &merges, &layout, grid, appearance.as_ref(), opts) {
             Some(table) => out.push_str(&table),
             None => out.push_str("<div class=\"wrap\"><p class=\"empty\">Лист пуст</p></div>\n"),
         }
@@ -361,6 +368,7 @@ fn render_sheet(
     merges: &[CellRange],
     layout: &SheetLayout,
     show_grid: bool,
+    ap: Option<&Appearance>,
     opts: &HtmlOptions,
 ) -> Option<String> {
     // Размах считается по фактическим данным, а не по объявленному
@@ -379,6 +387,11 @@ fn render_sheet(
     if !any {
         return None;
     }
+
+    // Лист со снятой сеткой — это свёрстанный документ, а не вид таблицы;
+    // буквы столбцов и номера строк в нём такой же посторонний элемент, как
+    // линейка поверх страницы.
+    let headers = opts.headers && show_grid;
 
     let rows = (max_row.saturating_add(1)).min(opts.max_rows) as usize;
     let cols = (max_col.saturating_add(1)).min(opts.max_cols) as usize;
@@ -436,21 +449,55 @@ fn render_sheet(
         }
     }
 
+    // Excel даёт тексту вытекать вправо только пока соседние ячейки пусты;
+    // как только справа появляется содержимое, текст обрезается. Без этого
+    // правила подписи налезают друг на друга.
+    let mut clip = vec![false; rows.saturating_mul(cols)];
+    for r in 0..rows {
+        for c in 0..cols {
+            let occupied = grid
+                .get(idx(r, c))
+                .is_some_and(|s| !s.text.is_empty() && !s.covered);
+            if !occupied {
+                continue;
+            }
+            let next = c.saturating_add(1);
+            if next < cols
+                && grid
+                    .get(idx(r, next))
+                    .is_some_and(|s| !s.text.is_empty() || s.covered)
+                && let Some(f) = clip.get_mut(idx(r, c))
+            {
+                *f = true;
+            }
+        }
+    }
+
     let mut out = String::with_capacity(rows.saturating_mul(cols).saturating_mul(24));
+    // Суммарная ширина обязана быть проставлена явно. `table-layout:fixed`
+    // при `width:auto` Chrome применяет непоследовательно: он игнорирует
+    // colgroup и раздувает столбцы по содержимому, из-за чего лист в 68 узких
+    // колонок уезжает за экран и выглядит совершенно иначе, чем в Excel.
+    let head_px = if headers { 46.0 } else { 0.0 };
+    let total_px: f64 = head_px
+        + (0..cols)
+            .map(|c| layout.col_width(c as u32).map_or(64.0, col_px))
+            .sum::<f64>();
+
     // Сетку рисуем только там, где её рисует Excel. Иначе бланк, у которого
     // `showGridLines="false"`, тонет в сплошной сетке, и все его рамки —
     // единственное, что делает форму формой, — перестают читаться.
-    out.push_str(if show_grid {
-        "<div class=\"wrap\"><table class=\"grid\">\n"
-    } else {
-        "<div class=\"wrap\"><table>\n"
-    });
+    let _ = write!(
+        out,
+        "<div class=\"wrap\"><table class=\"{}\" style=\"width:{total_px}px\">\n",
+        if show_grid { "grid" } else { "plain" }
+    );
 
     // Ширины объявлены в файле — переносим их. `table-layout:fixed` нужен,
     // чтобы браузер их слушался: при автоматической раскладке он растянет
     // столбцы по содержимому и бланк перестанет быть бланком.
     out.push_str("<colgroup>");
-    if opts.headers {
+    if headers {
         out.push_str("<col style=\"width:46px\">");
     }
     for c in 0..cols {
@@ -463,7 +510,7 @@ fn render_sheet(
     }
     out.push_str("</colgroup>\n");
 
-    if opts.headers {
+    if headers {
         out.push_str("<thead><tr><th></th>");
         for c in 0..cols {
             let _ = write!(out, "<th>{}</th>", col_letter(c as u32));
@@ -479,7 +526,7 @@ fn render_sheet(
             }
             None => out.push_str("<tr>"),
         }
-        if opts.headers {
+        if headers {
             let _ = write!(out, "<th>{}</th>", r.saturating_add(1));
         }
         for c in 0..cols {
@@ -491,10 +538,16 @@ fn render_sheet(
             }
             let mut class = slot.class.to_owned();
             if slot.title.is_some() {
-                class.push_str(" f");
+                class.push_str(" ff");
             }
             if let Some(sx) = slot.style {
                 let _ = write!(class, " x{sx}");
+                if ap.is_some_and(|a| a.xf(sx).is_some_and(|x| x.wrap)) {
+                    class.push_str(" ww");
+                }
+            }
+            if clip.get(idx(r, c)).copied().unwrap_or(false) {
+                class.push_str(" clip");
             }
             out.push_str("<td class=\"");
             out.push_str(&class);
