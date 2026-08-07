@@ -442,3 +442,33 @@ pub extern "C" fn ooxml_save() -> u64 {
     st.out = st.bytes.clone();
     pack(st.out.as_ptr() as u32, st.out.len() as u32)
 }
+
+/// Задаёт кегль шрифта ячейки в пунктах и пересобирает файл.
+///
+/// Возвращает 1 при успехе, 0 при ошибке.
+#[unsafe(no_mangle)]
+pub extern "C" fn ooxml_set_font_size(sheet: u32, row: u32, col: u32, points: f64) -> u32 {
+    let Some(st) = state() else { return 0 };
+    let bytes = mem::take(&mut st.bytes);
+    let result = (|| -> Result<Vec<u8>, String> {
+        let mut wb =
+            Workbook::open_with_limits(&bytes, Limits::strict()).map_err(|e| e.to_string())?;
+        let at = ooxml::xlsx::CellRef::checked(row, col).map_err(|e| e.to_string())?;
+        wb.sheet(sheet as usize)
+            .map_err(|e| e.to_string())?
+            .set_font_size(at, points)
+            .map_err(|e| e.to_string())?;
+        wb.save().map_err(|e| e.to_string())
+    })();
+    match result {
+        Ok(next) => {
+            st.bytes = next;
+            1
+        }
+        Err(e) => {
+            st.bytes = bytes;
+            st.error = e;
+            0
+        }
+    }
+}

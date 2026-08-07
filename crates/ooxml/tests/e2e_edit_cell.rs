@@ -286,3 +286,79 @@ fn libreoffice_opens_our_edit_and_sees_the_new_value() {
         "LibreOffice открыл файл, но не увидел нашу правку"
     );
 }
+
+#[test]
+fn changing_font_size_keeps_everything_else() {
+    // Кегль живёт не в ячейке, а в `xl/styles.xml`, и меняется он заведением
+    // новой записи формата. Проверяем главное: правка задевает ровно две
+    // части — лист и стили, — а прежнее оформление ячейки уцелело.
+    let files = xlsx_files();
+    if files.is_empty() {
+        eprintln!("корпус не найден — тест пропущен");
+        return;
+    }
+
+    let limits = Limits::strict();
+    let (mut books, mut untouched) = (0u32, 0u32);
+
+    for path in files.iter().take(8) {
+        let data = std::fs::read(path).unwrap();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+
+        let mut wb = ooxml::xlsx::Workbook::open(&data).unwrap();
+        let sheets = wb.sheets().len();
+        if sheets == 0 {
+            continue;
+        }
+
+        // Берём ячейку, у которой уже есть оформление: на ней видно, что
+        // остальные свойства пережили правку.
+        let (at, before) = {
+            let mut sh = wb.sheet(0).unwrap();
+            let Some(c) = sh
+                .read_all()
+                .unwrap()
+                .into_iter()
+                .find(|c| c.style.is_some_and(|s| s > 0))
+            else {
+                continue;
+            };
+            (c.at, c.style)
+        };
+
+        wb.sheet(0).unwrap().set_font_size(at, 22.0).unwrap();
+        let out = wb.save().unwrap();
+        assert_ne!(out, data, "{name}: правка кегля ничего не изменила");
+
+        let a = ZipArchive::parse(&data, &limits).unwrap();
+        let b = ZipArchive::parse(&out, &limits).unwrap();
+        for i in 0..a.len() {
+            let part = a.name_str(i).unwrap().into_owned();
+            let touched = part.contains("worksheets/") || part.ends_with("styles.xml");
+            if !touched {
+                assert_eq!(
+                    a.raw_data(i).unwrap(),
+                    b.raw_data(i).unwrap(),
+                    "{name}!{part}: правка кегля задела чужую запись"
+                );
+                untouched += 1;
+            }
+        }
+
+        // Перечитываем: номер стиля обязан смениться, а сам кегль стать 22.
+        let mut wb2 = ooxml::xlsx::Workbook::open(&out).unwrap();
+        let after = wb2.sheet(0).unwrap().get(at).unwrap().and_then(|c| c.style);
+        assert_ne!(after, before, "{name}: номер стиля не изменился");
+
+        let ap = wb2.appearance().unwrap().unwrap();
+        let size = after.and_then(|s| ap.font_of(s)).and_then(|f| f.size);
+        assert_eq!(size, Some(22.0), "{name}: кегль не применился");
+
+        books += 1;
+    }
+
+    println!("правка кегля:");
+    println!("  книг: {books}");
+    println!("  соседних записей, оставшихся побайтово теми же: {untouched}");
+    assert!(books >= 5, "проверено слишком мало книг: {books}");
+}

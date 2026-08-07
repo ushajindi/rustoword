@@ -79,6 +79,7 @@ pub mod worksheet;
 pub(crate) mod recalc;
 
 pub mod appearance;
+pub(crate) mod stylewrite;
 
 pub use appearance::{
     Appearance, BorderStyle, Borders, Color, Edge, Fill, Font, HAlign, VAlign, Xf, col_width_px,

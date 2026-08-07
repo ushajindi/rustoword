@@ -323,6 +323,20 @@ impl<'a> Workbook<'a> {
     /// # Errors
     ///
     /// Ошибки распаковки и XML.
+    /// Дерево `xl/styles.xml` для правки.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unsupported`], если части стилей в пакете нет: завести её с
+    /// нуля мы пока не умеем, а молча проигнорировать правку — значит соврать.
+    pub(crate) fn styles_dom(&mut self) -> Result<&mut Document> {
+        let part = PartName::new("/xl/styles.xml")?;
+        if !self.pkg.has(&part) {
+            return Err(Error::Unsupported("в книге нет xl/styles.xml"));
+        }
+        self.pkg.dom(&part)
+    }
+
     pub fn appearance(&mut self) -> Result<Option<Appearance>> {
         let Ok(part) = PartName::new("/xl/styles.xml") else {
             return Ok(None);

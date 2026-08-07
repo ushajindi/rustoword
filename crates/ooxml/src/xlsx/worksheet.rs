@@ -313,6 +313,41 @@ impl Sheet<'_, '_> {
     /// из неё всё старое.
     ///
     /// Возвращает узел `<c>`.
+    /// Задаёт кегль шрифта ячейки в пунктах.
+    ///
+    /// Остальное оформление — заливка, рамки, выравнивание, начертание —
+    /// переносится без изменений: меняется только размер. Ячейки, ссылавшиеся
+    /// на прежний стиль, не затрагиваются, потому что заводится новая запись
+    /// формата, а не правится общая.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unsupported`] при кегле вне диапазона Excel (1..409) или если
+    /// в книге нет `xl/styles.xml`; ошибки XML.
+    pub fn set_font_size(&mut self, at: CellRef, points: f64) -> Result<()> {
+        check_ref(at)?;
+        let current = self.get(at)?.and_then(|c| c.style);
+
+        let style = {
+            let doc = self.wb.styles_dom()?;
+            crate::xlsx::stylewrite::style_with_font_size(doc, current, points)?
+        };
+
+        let i = self.at;
+        let doc = self.wb.sheet_dom(i)?;
+        let sd = ensure_sheet_data(doc)?;
+        let row = ensure_row(doc, sd, at.row)?;
+        let cell = ensure_cell(doc, row, at)?;
+        doc.set_attr(cell, "s", &style.to_string())?;
+
+        // Намеренно НЕ помечаем книгу требующей пересчёта: кегль на значения
+        // не влияет, а флаг `fullCalcOnLoad` живёт в `xl/workbook.xml` и
+        // заставил бы переписать ещё одну часть без всякой нужды. Диапазон
+        // расширяем: оформленная ячейка может лежать за прежней границей.
+        let doc = self.wb.sheet_dom(self.at)?;
+        expand_dimension(doc, at)
+    }
+
     fn prepare(&mut self, at: CellRef) -> Result<NodeId> {
         check_ref(at)?;
         let i = self.at;

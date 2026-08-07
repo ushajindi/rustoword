@@ -14,6 +14,7 @@ header .sp{flex:1}
 button,label.file{border:1px solid var(--line);background:#fff;border-radius:6px;padding:5px 10px;cursor:pointer;font:inherit}
 button:hover,label.file:hover{background:#f0f0ec}
 #addr{font-variant-numeric:tabular-nums;min-width:70px;padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:#fff}
+#size{padding:4px 6px;border:1px solid var(--line);border-radius:6px;background:#fff;font:inherit;min-width:76px}
 #formula{flex:1;padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:#fff;font-family:ui-monospace,monospace}
 #stage{flex:1;position:relative;overflow:hidden;background:#fff}
 canvas{position:absolute;inset:0;display:block}
@@ -32,6 +33,11 @@ footer{display:flex;gap:8px;align-items:center;padding:6px 12px;border-top:1px s
   <label class="file">Открыть<input type="file" accept=".xlsx" hidden id="pick"></label>
   <button id="save">Сохранить .xlsx</button>
   <span id="addr">A1</span>
+  <select id="size" title="размер шрифта">
+    <option value="">кегль</option>
+  </select>
+  <button id="less" title="уменьшить">A−</button>
+  <button id="more" title="увеличить">A+</button>
   <input id="formula" placeholder="значение ячейки">
   <span class="sp"></span>
   <button id="grid">Сетка</button>
@@ -73,6 +79,9 @@ const W = {
     return ok;
   },
   save() { return this.take(this.ex.ooxml_save()); },
+  setFontSize(sheet, row, col, pt) {
+    return this.ex.ooxml_set_font_size(sheet, row, col, pt) === 1;
+  },
 };
 
 // ------------------------------------------------------- разбор блоков ядра
@@ -409,6 +418,9 @@ function syncBar() {
   const cell = S && S.cells.get(sel.r * 65536 + sel.c);
   document.getElementById('addr').textContent = colName(sel.c) + (sel.r + 1);
   document.getElementById('formula').value = cell ? cell.text : '';
+  const pt = currentSize();
+  const box = document.getElementById('size');
+  if (box) box.value = pt !== null && SIZES.includes(pt) ? String(pt) : '';
 }
 
 edit.addEventListener('keydown', e => {
@@ -471,6 +483,59 @@ document.getElementById('save').onclick = () => {
   URL.revokeObjectURL(a.href);
   status.textContent = `сохранено ${bytes.length} байт`;
 };
+
+// ---------------------------------------------------------------- кегль
+// Ряд Excel плюс промежуточные значения: свои числа задаются вводом с
+// клавиатуры в том же поле, поэтому список не обязан быть исчерпывающим.
+const SIZES = [6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72];
+const sizeBox = document.getElementById('size');
+for (const v of SIZES) {
+  const o = document.createElement('option');
+  o.value = String(v); o.textContent = String(v);
+  sizeBox.appendChild(o);
+}
+
+/// Кегль выделенной ячейки в пунктах. `null` — стиля нет.
+function currentSize() {
+  const cell = S && S.cells.get(sel.r * 65536 + sel.c);
+  const st = cell && ST[cell.style];
+  // В блоке стилей размер хранится уже в пикселях — возвращаем пункты.
+  return st ? Math.round(st.size * 3 / 4 * 10) / 10 : null;
+}
+
+async function applySize(pt) {
+  if (!S) return;
+  const t0 = performance.now();
+  if (!W.setFontSize(sheetIndex, sel.r, sel.c, pt)) {
+    status.textContent = 'кегль не изменён: ' + W.error();
+    return;
+  }
+  // Перечитываем и лист, и стили: заведена новая запись формата, и номера
+  // могли смениться у самой ячейки.
+  ST = parseStyles(W.styles());
+  S = parseSheet(W.sheet(sheetIndex));
+  geometry();
+  status.textContent = `кегль ${pt} в ${colName(sel.c)}${sel.r + 1} за ${(performance.now() - t0).toFixed(0)} мс`;
+  syncBar();
+  draw();
+}
+
+sizeBox.addEventListener('change', () => {
+  const pt = parseFloat(sizeBox.value);
+  if (Number.isFinite(pt)) applySize(pt);
+  edit.focus();
+});
+
+// Шаг по ряду Excel, а не «плюс единица»: так же ведут себя кнопки в Word.
+const stepSize = dir => {
+  const now = currentSize() ?? 11;
+  const i = SIZES.findIndex(v => v >= now - 0.01);
+  const next = dir > 0 ? SIZES[Math.min(SIZES.length - 1, (i < 0 ? 0 : i) + 1)]
+                       : SIZES[Math.max(0, (i < 0 ? SIZES.length - 1 : i) - 1)];
+  if (next && Math.abs(next - now) > 0.01) applySize(next);
+};
+document.getElementById('more').onclick = () => stepSize(1);
+document.getElementById('less').onclick = () => stepSize(-1);
 
 document.getElementById('grid').onclick = () => { showGrid = !showGrid; draw(); };
 addEventListener('resize', draw);

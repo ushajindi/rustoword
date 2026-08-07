@@ -1,0 +1,255 @@
+//! Правка оформления: заведение шрифта и записи формата.
+//!
+//! # Почему это не «поменять атрибут»
+//!
+//! Ячейка не хранит своё оформление — она хранит номер записи в `cellXfs`, а та
+//! ссылается на шрифт, заливку и рамку по номерам. Чтобы поменять один кегль,
+//! нужно завести шрифт с новым размером, завести запись формата, во всём
+//! повторяющую прежнюю, но с новым номером шрифта, и переставить номер у
+//! ячейки. Прямая правка существующего шрифта задела бы все ячейки, которые на
+//! него ссылаются, — а их обычно сотни.
+//!
+//! # Дедупликация обязательна
+//!
+//! Без неё каждое нажатие «увеличить кегль» дописывало бы новый шрифт и новую
+//! запись формата. Файл, который правят полчаса, распух бы на тысячи записей,
+//! а Excel имеет предел в 64 000 стилей. Поэтому перед добавлением ищем
+//! совпадение среди уже имеющихся.
+
+use crate::dom::{Document, NodeId};
+use crate::error::{Error, Result};
+
+/// Пространство имён SpreadsheetML.
+const SML: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+
+/// Находит прямого потомка с данным локальным именем.
+fn child(doc: &Document, n: NodeId, local: &str) -> Option<NodeId> {
+    doc.find_child(n, Some(SML), local)
+        .or_else(|| doc.find_child(n, None, local))
+}
+
+/// Дети с данным локальным именем, в порядке следования.
+fn children_named(doc: &Document, n: NodeId, local: &str) -> Vec<NodeId> {
+    doc.children(n)
+        .filter(|&c| doc.local_name(c) == Some(local.as_bytes()))
+        .collect()
+}
+
+/// Приводит поддерево к строке — она служит ключом сравнения при дедупликации.
+///
+/// Сравнивать разобранные поля пришлось бы поле за полем, и любое, о котором мы
+/// не знаем (а в `<font>` их десяток), считалось бы одинаковым у разных
+/// шрифтов. Сравнение сериализованного вида таких промахов не допускает.
+fn fingerprint(doc: &Document, n: NodeId) -> Result<String> {
+    let bytes = doc.serialize_node(n)?;
+    String::from_utf8(bytes).map_err(|_| Error::Unsupported("styles: не UTF-8"))
+}
+
+/// Обеспечивает наличие шрифта, отличающегося от `font_id` только кеглем.
+///
+/// Возвращает номер шрифта: существующего, если такой уже есть, иначе нового.
+fn ensure_font(doc: &mut Document, fonts: NodeId, font_id: u32, size_pt: f64) -> Result<u32> {
+    let list = children_named(doc, fonts, "font");
+    let base = list
+        .get(font_id as usize)
+        .copied()
+        .or_else(|| list.first().copied())
+        .ok_or(Error::Unsupported("styles: нет ни одного шрифта"))?;
+
+    let clone = doc.clone_subtree(base)?;
+    match child(doc, clone, "sz") {
+        Some(sz) => doc.set_attr(sz, "val", &format_size(size_pt))?,
+        None => {
+            let sz = doc.new_element("sz")?;
+            doc.set_attr(sz, "val", &format_size(size_pt))?;
+            doc.append_child(clone, sz)?;
+        }
+    }
+
+    // Присоединяем сразу, а лишнее убираем после сравнения: `remove` работает
+    // только с узлом, у которого есть родитель, а `clone_subtree` отдаёт
+    // отсоединённый.
+    doc.append_child(fonts, clone)?;
+    let want = fingerprint(doc, clone)?;
+    for (i, &f) in list.iter().enumerate() {
+        if fingerprint(doc, f)? == want {
+            doc.remove(clone)?;
+            return u32::try_from(i)
+                .map_err(|_| Error::Unsupported("styles: слишком много шрифтов"));
+        }
+    }
+
+    bump_count(doc, fonts)?;
+    u32::try_from(list.len()).map_err(|_| Error::Unsupported("styles: слишком много шрифтов"))
+}
+
+/// Обеспечивает наличие записи формата, повторяющей `xf_id`, но с иным шрифтом.
+fn ensure_xf(doc: &mut Document, cell_xfs: NodeId, xf_id: u32, font_id: u32) -> Result<u32> {
+    let list = children_named(doc, cell_xfs, "xf");
+    let base = list
+        .get(xf_id as usize)
+        .copied()
+        .or_else(|| list.first().copied())
+        .ok_or(Error::Unsupported("styles: нет ни одной записи формата"))?;
+
+    let clone = doc.clone_subtree(base)?;
+    doc.set_attr(clone, "fontId", &font_id.to_string())?;
+    // Без `applyFont` Excel вправе проигнорировать ссылку на шрифт.
+    doc.set_attr(clone, "applyFont", "1")?;
+
+    doc.append_child(cell_xfs, clone)?;
+    let want = fingerprint(doc, clone)?;
+    for (i, &x) in list.iter().enumerate() {
+        if fingerprint(doc, x)? == want {
+            doc.remove(clone)?;
+            return u32::try_from(i)
+                .map_err(|_| Error::Unsupported("styles: слишком много форматов"));
+        }
+    }
+
+    bump_count(doc, cell_xfs)?;
+    u32::try_from(list.len()).map_err(|_| Error::Unsupported("styles: слишком много форматов"))
+}
+
+/// Увеличивает атрибут `count` на единицу, если он есть.
+///
+/// Атрибут необязателен, но если он есть и врёт, Excel сообщает о повреждении
+/// файла. Поэтому либо поддерживаем его точным, либо не трогаем вовсе.
+fn bump_count(doc: &mut Document, n: NodeId) -> Result<()> {
+    let Some(v) = doc.attr(n, None, "count") else {
+        return Ok(());
+    };
+    let next = v.trim().parse::<u64>().unwrap_or(0).saturating_add(1);
+    doc.set_attr(n, "count", &next.to_string())
+}
+
+/// Печатает кегль так, как это делает Excel: без хвоста у целых значений.
+fn format_size(pt: f64) -> String {
+    if pt == pt.trunc() {
+        format!("{pt:.0}")
+    } else {
+        let s = format!("{pt:.2}");
+        s.trim_end_matches('0').trim_end_matches('.').to_owned()
+    }
+}
+
+/// Подбирает номер записи формата с нужным кеглем, заводя недостающее.
+///
+/// `style` — текущий номер у ячейки (`None` означает нулевой). Заливка, рамки и
+/// выравнивание переносятся без изменений: меняется только шрифт.
+///
+/// # Errors
+///
+/// Ошибки XML; [`Error::Unsupported`], если структура `styles.xml` неожиданная.
+pub(crate) fn style_with_font_size(
+    doc: &mut Document,
+    style: Option<u32>,
+    size_pt: f64,
+) -> Result<u32> {
+    if !(1.0..=409.0).contains(&size_pt) {
+        // Пределы самого Excel. Молча зажать значение нельзя: пользователь
+        // увидит не то, что ввёл, и решит, что правка не сработала.
+        return Err(Error::Unsupported("styles: кегль вне диапазона 1..409"));
+    }
+
+    let root = doc.root_element()?;
+    let fonts = child(doc, root, "fonts").ok_or(Error::Unsupported("styles: нет <fonts>"))?;
+    let cell_xfs =
+        child(doc, root, "cellXfs").ok_or(Error::Unsupported("styles: нет <cellXfs>"))?;
+
+    let xf_id = style.unwrap_or(0);
+    let xfs = children_named(doc, cell_xfs, "xf");
+    let base_font = xfs
+        .get(xf_id as usize)
+        .and_then(|&x| doc.attr(x, None, "fontId"))
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+
+    let font_id = ensure_font(doc, fonts, base_font, size_pt)?;
+    ensure_xf(doc, cell_xfs, xf_id, font_id)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
+
+    use super::*;
+    use crate::limits::Limits;
+
+    const STYLES: &[u8] = br#"<?xml version="1.0"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<fonts count="2"><font><name val="Arial"/><sz val="10"/></font><font><b/><sz val="14"/></font></fonts>
+<fills count="1"><fill><patternFill patternType="none"/></fill></fills>
+<borders count="1"><border><left/><right/><top/><bottom/></border></borders>
+<cellXfs count="2"><xf fontId="0" fillId="0" borderId="0"/><xf fontId="1" fillId="0" borderId="0" applyFont="1"/></cellXfs>
+</styleSheet>"#;
+
+    fn doc() -> Document {
+        Document::parse(STYLES.to_vec(), &Limits::strict()).unwrap()
+    }
+
+    #[test]
+    fn new_size_adds_one_font_and_one_format() {
+        let mut d = doc();
+        let s = style_with_font_size(&mut d, Some(0), 18.0).unwrap();
+        assert_eq!(s, 2, "должна появиться третья запись формата");
+        let out = String::from_utf8(d.serialize().unwrap()).unwrap();
+        assert!(out.contains(r#"<sz val="18"/>"#), "{out}");
+        assert_eq!(out.matches("<font>").count(), 3);
+        assert!(
+            out.contains(r#"<fonts count="3""#),
+            "счётчик не обновлён: {out}"
+        );
+    }
+
+    #[test]
+    fn repeated_request_reuses_what_it_made() {
+        // Без дедупликации каждое нажатие «увеличить кегль» дописывало бы
+        // запись; за полчаса правки файл распух бы на тысячи стилей.
+        let mut d = doc();
+        let a = style_with_font_size(&mut d, Some(0), 18.0).unwrap();
+        let b = style_with_font_size(&mut d, Some(0), 18.0).unwrap();
+        assert_eq!(a, b);
+        let out = String::from_utf8(d.serialize().unwrap()).unwrap();
+        assert_eq!(
+            out.matches("<font>").count(),
+            3,
+            "шрифт задублировался: {out}"
+        );
+        assert_eq!(
+            out.matches("<xf ").count(),
+            3,
+            "формат задублировался: {out}"
+        );
+    }
+
+    #[test]
+    fn existing_size_is_found_not_created() {
+        // Кегль 14 уже есть у второго шрифта, но с жирным начертанием —
+        // значит совпадением он не считается, шрифт всё равно новый.
+        let mut d = doc();
+        style_with_font_size(&mut d, Some(0), 14.0).unwrap();
+        let out = String::from_utf8(d.serialize().unwrap()).unwrap();
+        assert_eq!(out.matches("<font>").count(), 3, "{out}");
+    }
+
+    #[test]
+    fn other_properties_survive() {
+        // Меняем кегль у жирного шрифта: жирность обязана остаться.
+        let mut d = doc();
+        let s = style_with_font_size(&mut d, Some(1), 20.0).unwrap();
+        let out = String::from_utf8(d.serialize().unwrap()).unwrap();
+        assert!(out.contains(r#"<b/><sz val="20"/>"#), "{out}");
+        assert!(s >= 2);
+    }
+
+    #[test]
+    fn absurd_size_is_rejected_loudly() {
+        let mut d = doc();
+        assert!(style_with_font_size(&mut d, Some(0), 0.0).is_err());
+        assert!(style_with_font_size(&mut d, Some(0), 500.0).is_err());
+        // Отказ не должен ничего дописать.
+        let out = String::from_utf8(d.serialize().unwrap()).unwrap();
+        assert_eq!(out.matches("<font>").count(), 2, "{out}");
+    }
+}
