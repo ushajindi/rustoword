@@ -1,9 +1,13 @@
 //! Сжатие и распаковка DEFLATE (RFC 1951).
 //!
-//! ЗАГЛУШКА ВЕХИ M0. Здесь зафиксированы только сигнатуры — они контракт между
-//! вехами M1 (inflate), M4 (deflate) и слоем `zip`, который пишется параллельно.
-//! Реализация приходит в M1/M4; до тех пор функции возвращают
-//! [`Error::Unsupported`].
+//! Распаковка реализована в вехе M1; [`deflate`] остаётся заглушкой до M4.
+//! Сигнатуры — контракт со слоем `zip`, который пишется параллельно.
+//!
+//! # Устройство распаковщика
+//!
+//! - `bitreader` отдаёт биты в порядке потока (LSB-first);
+//! - `huffman` строит по длинам кодов двухуровневую таблицу просмотра;
+//! - `inflate` разбирает блоки и разворачивает совпадения LZ77.
 //!
 //! # Почему лимиты передаются целиком
 //!
@@ -13,7 +17,11 @@
 //! там стоит правдоподобная цифра. Поэтому лимиты нужны внутри цикла, а не
 //! снаружи него.
 
-use crate::error::{Error, Result};
+mod bitreader;
+mod huffman;
+mod inflate;
+
+use crate::error::Result;
 use crate::limits::Limits;
 
 /// Уровень сжатия.
@@ -30,7 +38,8 @@ pub enum Level {
 /// Распаковывает поток DEFLATE целиком.
 ///
 /// # Errors
-/// [`Error::Deflate`] на битом потоке, [`Error::Limit`] при превышении квоты.
+/// [`crate::Error::Deflate`] на битом потоке, [`crate::Error::Limit`] при
+/// превышении квоты.
 pub fn inflate(input: &[u8], limits: &Limits) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     inflate_into(input, &mut out, limits)?;
@@ -44,10 +53,10 @@ pub fn inflate(input: &[u8], limits: &Limits) -> Result<Vec<u8>> {
 /// следующий заголовок), а не мусор.
 ///
 /// # Errors
-/// [`Error::Deflate`] на битом потоке, [`Error::Limit`] при превышении квоты.
+/// [`crate::Error::Deflate`] на битом потоке, [`crate::Error::Limit`] при
+/// превышении квоты.
 pub fn inflate_into(input: &[u8], out: &mut Vec<u8>, limits: &Limits) -> Result<usize> {
-    let _ = (input, out, limits);
-    Err(Error::Unsupported("inflate появится в вехе M1"))
+    inflate::inflate_into(input, out, limits)
 }
 
 /// Сжимает данные в поток DEFLATE.
