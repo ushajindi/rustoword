@@ -41,6 +41,7 @@ pub mod dom;
 pub mod error;
 pub mod hash;
 pub mod limits;
+pub mod opc;
 pub mod xml;
 pub mod zip;
 
