@@ -26,3 +26,14 @@ indexing_slicing = "deny"
 # Веха M11 поднимает это до "deny". Пока warn: арифметика над полями заголовков
 # уже идёт через checked_*, а фаззер гоняется в debug, где переполнение паникует.
 arithmetic_side_effects = "warn"
+
+# Профиль для браузера: там важен не пик скорости, а вес загрузки.
+# opt-level="z" жмёт код, LTO выкидывает всё недостижимое, abort убирает
+# машинерию раскрутки стека — паники в ядре и так запрещены линтами.
+[profile.wasm]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
