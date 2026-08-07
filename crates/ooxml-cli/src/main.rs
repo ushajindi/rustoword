@@ -140,6 +140,99 @@ fn cmd_info(path: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Раскладывает оба заголовка каждой записи по полям.
+///
+/// Когда байтовая идентичность расходится на одном байте, сравнить два таких
+/// дампа — единственный способ понять, какое поле разъехалось, не читая hex
+/// глазами. Печатаются в том числе поля, которые различаются между локальным
+/// заголовком и каталогом: именно они ломают наивные writer'ы.
+fn cmd_zipdump(path: &str) -> ExitCode {
+    let limits = Limits::strict();
+    let Ok(data) = read(path).inspect_err(|e| eprintln!("{e}")) else {
+        return ExitCode::FAILURE;
+    };
+    let archive = match ZipArchive::parse(&data, &limits) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("{path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    println!("{path}: {} байт, {} записей", data.len(), archive.len());
+    println!("префикс: {} байт", archive.prefix().len());
+
+    for (i, e) in archive.entries().iter().enumerate() {
+        let name = archive
+            .name_str(i)
+            .map_or_else(|_| "<нечитаемое имя>".into(), std::borrow::Cow::into_owned);
+        println!("\n[{i}] {name}");
+        println!(
+            "  made by {:<4} needed local/cd {}/{}{}",
+            e.version_made_by,
+            e.version_needed_local,
+            e.version_needed_cd,
+            if e.version_needed_local == e.version_needed_cd {
+                ""
+            } else {
+                "  <-- РАСХОДЯТСЯ"
+            }
+        );
+        println!(
+            "  flags {:#06x}  method {}  dos {:#06x}/{:#06x}{}",
+            e.flags,
+            e.method,
+            e.dos_date,
+            e.dos_time,
+            if e.dos_date == 0 && e.dos_time == 0 {
+                "  <-- нулевая дата, не нормализовать"
+            } else {
+                ""
+            }
+        );
+        println!(
+            "  crc {:#010x}  сжато {}  распаковано {}",
+            e.crc32, e.comp_size, e.uncomp_size
+        );
+        if e.flags & 0x0008 != 0 {
+            println!(
+                "  локально crc/размеры: {:#010x}/{}/{} (нули при bit 3 — так и надо)",
+                e.crc32_local, e.comp_size_local, e.uncomp_size_local
+            );
+        }
+        println!(
+            "  extra local/cd {}/{} байт{}",
+            e.local_extra.len(),
+            e.cd_extra.len(),
+            if e.local_extra.len() == e.cd_extra.len() {
+                ""
+            } else {
+                "  <-- РАСХОДЯТСЯ, копировать нельзя"
+            }
+        );
+        println!(
+            "  attrs internal {:#06x} external {:#010x}  офсет заголовка {}",
+            e.internal_attrs, e.external_attrs, e.local_header_off
+        );
+        if let Some(d) = &e.descriptor {
+            println!(
+                "  дескриптор: {} байт, сигнатура {}, поля {} бит",
+                d.span.len(),
+                if d.has_signature {
+                    "есть"
+                } else {
+                    "нет"
+                },
+                if d.wide { 64 } else { 32 }
+            );
+        }
+        if let Some(z) = &e.zip64_layout {
+            println!("  zip64: {z:?}");
+        }
+    }
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = args.first() else {
@@ -155,11 +248,12 @@ fn main() -> ExitCode {
         }
         "roundtrip" if !rest.is_empty() => cmd_roundtrip(rest),
         "info" if rest.len() == 1 => rest.first().map_or(ExitCode::FAILURE, |p| cmd_info(p)),
-        "roundtrip" | "info" => {
+        "zipdump" if rest.len() == 1 => rest.first().map_or(ExitCode::FAILURE, |p| cmd_zipdump(p)),
+        "roundtrip" | "info" | "zipdump" => {
             eprintln!("команде `{cmd}` нужен путь к файлу");
             ExitCode::FAILURE
         }
-        "zipdump" | "xmldump" | "get" | "set" => {
+        "xmldump" | "get" | "set" => {
             eprintln!("команда `{cmd}` появится вместе с соответствующей вехой");
             ExitCode::FAILURE
         }
