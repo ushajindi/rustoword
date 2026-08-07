@@ -1,0 +1,17 @@
+[package]
+name = "ooxml"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Ядро для работы с OOXML (.xlsx/.docx) с сохранением байтовой точности. Ноль зависимостей."
+
+# ЭТА СЕКЦИЯ ДОЛЖНА ОСТАВАТЬСЯ ПУСТОЙ.
+# Ноль зависимостей — архитектурное требование, проверяется тестом tests/no_deps.rs.
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true

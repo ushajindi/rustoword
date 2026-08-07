@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = ["crates/ooxml", "crates/ooxml-cli", "crates/xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/shakh/rustoword"
+
+# Политика линтов общая для всех крейтов. Ядро парсит недоверенный вход,
+# поэтому паника считается дефектом, а не способом сообщить об ошибке.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+indexing_slicing = "deny"
+# Веха M11 поднимает это до "deny". Пока warn: арифметика над полями заголовков
+# уже идёт через checked_*, а фаззер гоняется в debug, где переполнение паникует.
+arithmetic_side_effects = "warn"

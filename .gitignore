@@ -1,0 +1,7 @@
+target/
+
+# Корпус — реальные файлы пользователя, в репозиторий не попадают.
+# Тесты берут путь из OOXML_CORPUS, по умолчанию crates/ooxml/tests/corpus.
+crates/ooxml/tests/corpus/xlsx/
+crates/ooxml/tests/corpus/docx/
+crates/ooxml/tests/corpus/MANIFEST.tsv

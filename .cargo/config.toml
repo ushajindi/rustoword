@@ -1,0 +1,4 @@
+[alias]
+xtask = "run --quiet -p xtask --"
+ci = "run --quiet -p xtask -- ci"
+wasm = "check -p ooxml --target wasm32-unknown-unknown"
