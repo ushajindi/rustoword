@@ -51,7 +51,7 @@ use crate::dom::{Document, NodeId};
 use crate::error::{Result, XlsxError};
 use crate::xlsx::cell::{Cell, CellError};
 use crate::xlsx::refs::{CellRange, CellRef, parse_row_number};
-use crate::xlsx::scan::{SML_NS, scan_sheet, sheet_dimension};
+use crate::xlsx::scan::{SML_NS, scan_merges, scan_sheet, sheet_dimension};
 use crate::xlsx::workbook::Workbook;
 
 /// Куда `set_string` кладёт текст.
@@ -118,6 +118,20 @@ impl Sheet<'_, '_> {
     pub fn read_all(&mut self) -> Result<Vec<Cell>> {
         let i = self.at;
         self.wb.with_sheet_bytes(i, scan_sheet)
+    }
+
+    /// Объединённые диапазоны листа.
+    ///
+    /// Без них экспорт превращает объединённую шапку в набор пустых клеток
+    /// рядом с текстом — таблица формально верна, а читается неправильно.
+    ///
+    /// # Errors
+    ///
+    /// Ошибки распаковки и XML; [`XlsxError::BadCellRef`] на битом `ref`.
+    pub fn merges(&mut self) -> Result<Vec<CellRange>> {
+        let i = self.at;
+        self.wb
+            .with_sheet_bytes(i, |data, _, limits| scan_merges(data, limits))
     }
 
     /// Читает одну ячейку. `Ok(None)` — элемента `<c>` с таким адресом нет.

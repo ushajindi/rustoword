@@ -13,6 +13,8 @@
 )]
 
 use ooxml::Limits;
+use ooxml::export::html::{HtmlOptions, workbook_to_html};
+use ooxml::xlsx::Workbook;
 use ooxml::zip::{ZipArchive, repack_all_verbatim};
 use std::process::ExitCode;
 
@@ -26,6 +28,7 @@ ooxml — инструмент отладки ядра OOXML
     info <файл>              сводка по пакету
     zipdump <файл>           все поля обоих ZIP-заголовков каждой записи
     roundtrip <файл>...      пересобрать без правок и сравнить с исходником
+    html <файл> [выход]      показать книгу как самодостаточную HTML-страницу
     xmldump <файл> <часть>   разбор XML-части
     get <файл> <лист> <A1>   значение ячейки
     set <файл> <лист> <A1> <значение> -o <выход>
@@ -233,6 +236,49 @@ fn cmd_zipdump(path: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Экспортирует книгу в HTML.
+fn cmd_html(path: &str, out_path: Option<&str>) -> ExitCode {
+    let Ok(data) = read(path).inspect_err(|e| eprintln!("{e}")) else {
+        return ExitCode::FAILURE;
+    };
+    let mut wb = match Workbook::open(&data) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("{path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut opts = HtmlOptions::default();
+    opts.title = std::path::Path::new(path)
+        .file_name()
+        .map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned());
+
+    let html = match workbook_to_html(&mut wb, &opts) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("{path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match out_path {
+        Some(p) => match std::fs::write(p, &html) {
+            Ok(()) => {
+                println!("{p}: {} байт", html.len());
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{p}: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        None => {
+            print!("{html}");
+            ExitCode::SUCCESS
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = args.first() else {
@@ -248,6 +294,11 @@ fn main() -> ExitCode {
         }
         "roundtrip" if !rest.is_empty() => cmd_roundtrip(rest),
         "info" if rest.len() == 1 => rest.first().map_or(ExitCode::FAILURE, |p| cmd_info(p)),
+        "html" if rest.len() == 1 || rest.len() == 2 => {
+            rest.first().map_or(ExitCode::FAILURE, |p| {
+                cmd_html(p, rest.get(1).map(String::as_str))
+            })
+        }
         "zipdump" if rest.len() == 1 => rest.first().map_or(ExitCode::FAILURE, |p| cmd_zipdump(p)),
         "roundtrip" | "info" | "zipdump" => {
             eprintln!("команде `{cmd}` нужен путь к файлу");

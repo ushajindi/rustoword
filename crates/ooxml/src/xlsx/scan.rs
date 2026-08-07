@@ -589,6 +589,35 @@ fn value_of(
     }
 }
 
+/// Собирает объединённые диапазоны листа из `<mergeCells>`.
+///
+/// Вынесено отдельным проходом, а не встроено в [`scan_sheet`]: `<mergeCells>`
+/// стоит **после** `<sheetData>`, и сканер значений завершает работу раньше,
+/// чем до него дойдёт. Второй проход по той же части дешевле, чем тащить
+/// состояние через весь разбор ячеек ради элемента, который нужен не всем.
+///
+/// # Errors
+///
+/// Ошибки XML; [`XlsxError::BadCellRef`] на неразбираемом `ref`.
+pub fn scan_merges(part: &[u8], limits: &Limits) -> Result<Vec<CellRange>> {
+    let mut rd = Reader::with_limits(part, limits.clone());
+    let mut out = Vec::new();
+    loop {
+        match rd.next_event()? {
+            Event::Start { .. } => {
+                if local_name(&rd) == b"mergeCell"
+                    && in_sml(&rd)
+                    && let Some(v) = attr_str(&rd, b"ref")?
+                {
+                    out.push(CellRange::parse(v)?);
+                }
+            }
+            Event::Eof => return Ok(out),
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]

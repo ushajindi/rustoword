@@ -80,7 +80,7 @@ pub(crate) mod recalc;
 
 pub use cell::{Cell, CellError, CellType, CellValue, Formula, FormulaKind};
 pub use refs::{COLS, CellRange, CellRef, MAX_COL, MAX_ROW, ROWS};
-pub use scan::{SML_NS, ScanStats, scan_sheet, scan_sheet_stats, sheet_dimension};
+pub use scan::{SML_NS, ScanStats, scan_merges, scan_sheet, scan_sheet_stats, sheet_dimension};
 pub use sheetdata::SheetData;
 pub use sst::{SharedStrings, decode_x_escapes};
 pub use styles::{Styles, format_code_is_date};
