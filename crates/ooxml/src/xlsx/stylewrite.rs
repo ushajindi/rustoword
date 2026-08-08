@@ -55,8 +55,7 @@ fn ensure_font(
     doc: &mut Document,
     fonts: NodeId,
     font_id: u32,
-    size_pt: Option<f64>,
-    name: Option<&str>,
+    want: &FontEdit<'_>,
 ) -> Result<u32> {
     let list = children_named(doc, fonts, "font");
     let base = list
@@ -67,10 +66,24 @@ fn ensure_font(
 
     let clone = doc.clone_subtree(base)?;
 
-    if let Some(pt) = size_pt {
+    if let Some(pt) = want.size_pt {
         set_child_val(doc, clone, "sz", &format_size(pt))?;
     }
-    if let Some(n) = name {
+    // Начертание в OOXML — это наличие элемента, а не его значение. Выключаем
+    // удалением: `<b val="0"/>` формату не противоречит, но такого не пишет
+    // ни один из генераторов корпуса, и лишний элемент мешал бы дедупликации.
+    for (flag, tag) in [(want.bold, "b"), (want.italic, "i"), (want.underline, "u")] {
+        let Some(on) = flag else { continue };
+        match (on, child(doc, clone, tag)) {
+            (true, None) => {
+                let n = doc.new_element(tag)?;
+                doc.append_child(clone, n)?;
+            }
+            (false, Some(n)) => doc.remove(n)?,
+            _ => {}
+        }
+    }
+    if let Some(n) = want.name {
         // Гарнитура хранится в `<name>`, но у шрифтов из рич-текста тот же
         // смысл несёт `<rFont>`. Правим тот элемент, который есть.
         let tag = if child(doc, clone, "name").is_some() || child(doc, clone, "rFont").is_none() {
@@ -114,8 +127,16 @@ fn ensure_xf(doc: &mut Document, cell_xfs: NodeId, xf_id: u32, font_id: u32) -> 
 
     let clone = doc.clone_subtree(base)?;
     doc.set_attr(clone, "fontId", &font_id.to_string())?;
-    // Без `applyFont` Excel вправе проигнорировать ссылку на шрифт.
-    doc.set_attr(clone, "applyFont", "1")?;
+    // `applyFont` дописываем, только если там стоит явный отказ. Отсутствие
+    // атрибута само по себе означает «применять», а лишняя запись меняет
+    // байты и ломает дедупликацию: включив и выключив жирность, мы получали
+    // бы не исходный стиль, а его копию.
+    if matches!(
+        doc.attr(clone, None, "applyFont").as_deref(),
+        Some("0" | "false")
+    ) {
+        doc.set_attr(clone, "applyFont", "1")?;
+    }
 
     doc.append_child(cell_xfs, clone)?;
     let want = fingerprint(doc, clone)?;
@@ -173,12 +194,21 @@ fn format_size(pt: f64) -> String {
 /// # Errors
 ///
 /// Ошибки XML; [`Error::Unsupported`], если структура `styles.xml` неожиданная.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct FontEdit<'a> {
+    pub size_pt: Option<f64>,
+    pub name: Option<&'a str>,
+    pub bold: Option<bool>,
+    pub italic: Option<bool>,
+    pub underline: Option<bool>,
+}
+
 pub(crate) fn style_with_font(
     doc: &mut Document,
     style: Option<u32>,
-    size_pt: Option<f64>,
-    name: Option<&str>,
+    want: &FontEdit<'_>,
 ) -> Result<u32> {
+    let (size_pt, name) = (want.size_pt, want.name);
     if let Some(pt) = size_pt
         && !(1.0..=409.0).contains(&pt)
     {
@@ -208,7 +238,7 @@ pub(crate) fn style_with_font(
         .and_then(|v| v.trim().parse::<u32>().ok())
         .unwrap_or(0);
 
-    let font_id = ensure_font(doc, fonts, base_font, size_pt, name)?;
+    let font_id = ensure_font(doc, fonts, base_font, want)?;
     ensure_xf(doc, cell_xfs, xf_id, font_id)
 }
 
@@ -234,7 +264,15 @@ mod tests {
     #[test]
     fn new_size_adds_one_font_and_one_format() {
         let mut d = doc();
-        let s = style_with_font(&mut d, Some(0), Some(18.0), None).unwrap();
+        let s = style_with_font(
+            &mut d,
+            Some(0),
+            &FontEdit {
+                size_pt: Some(18.0),
+                ..FontEdit::default()
+            },
+        )
+        .unwrap();
         assert_eq!(s, 2, "должна появиться третья запись формата");
         let out = String::from_utf8(d.serialize().unwrap()).unwrap();
         assert!(out.contains(r#"<sz val="18"/>"#), "{out}");
@@ -250,8 +288,24 @@ mod tests {
         // Без дедупликации каждое нажатие «увеличить кегль» дописывало бы
         // запись; за полчаса правки файл распух бы на тысячи стилей.
         let mut d = doc();
-        let a = style_with_font(&mut d, Some(0), Some(18.0), None).unwrap();
-        let b = style_with_font(&mut d, Some(0), Some(18.0), None).unwrap();
+        let a = style_with_font(
+            &mut d,
+            Some(0),
+            &FontEdit {
+                size_pt: Some(18.0),
+                ..FontEdit::default()
+            },
+        )
+        .unwrap();
+        let b = style_with_font(
+            &mut d,
+            Some(0),
+            &FontEdit {
+                size_pt: Some(18.0),
+                ..FontEdit::default()
+            },
+        )
+        .unwrap();
         assert_eq!(a, b);
         let out = String::from_utf8(d.serialize().unwrap()).unwrap();
         assert_eq!(
@@ -271,7 +325,15 @@ mod tests {
         // Кегль 14 уже есть у второго шрифта, но с жирным начертанием —
         // значит совпадением он не считается, шрифт всё равно новый.
         let mut d = doc();
-        style_with_font(&mut d, Some(0), Some(14.0), None).unwrap();
+        style_with_font(
+            &mut d,
+            Some(0),
+            &FontEdit {
+                size_pt: Some(14.0),
+                ..FontEdit::default()
+            },
+        )
+        .unwrap();
         let out = String::from_utf8(d.serialize().unwrap()).unwrap();
         assert_eq!(out.matches("<font>").count(), 3, "{out}");
     }
@@ -280,7 +342,15 @@ mod tests {
     fn other_properties_survive() {
         // Меняем кегль у жирного шрифта: жирность обязана остаться.
         let mut d = doc();
-        let s = style_with_font(&mut d, Some(1), Some(20.0), None).unwrap();
+        let s = style_with_font(
+            &mut d,
+            Some(1),
+            &FontEdit {
+                size_pt: Some(20.0),
+                ..FontEdit::default()
+            },
+        )
+        .unwrap();
         let out = String::from_utf8(d.serialize().unwrap()).unwrap();
         assert!(out.contains(r#"<b/><sz val="20"/>"#), "{out}");
         assert!(s >= 2);
@@ -289,8 +359,24 @@ mod tests {
     #[test]
     fn font_name_is_applied_and_deduplicated() {
         let mut d = doc();
-        let a = style_with_font(&mut d, Some(0), None, Some("Georgia")).unwrap();
-        let b = style_with_font(&mut d, Some(0), None, Some("Georgia")).unwrap();
+        let a = style_with_font(
+            &mut d,
+            Some(0),
+            &FontEdit {
+                name: Some("Georgia"),
+                ..FontEdit::default()
+            },
+        )
+        .unwrap();
+        let b = style_with_font(
+            &mut d,
+            Some(0),
+            &FontEdit {
+                name: Some("Georgia"),
+                ..FontEdit::default()
+            },
+        )
+        .unwrap();
         assert_eq!(a, b, "повтор той же гарнитуры не должен плодить записи");
         let out = String::from_utf8(d.serialize().unwrap()).unwrap();
         assert!(out.contains(r#"<name val="Georgia"/>"#), "{out}");
@@ -300,7 +386,16 @@ mod tests {
     #[test]
     fn name_and_size_change_together_in_one_font() {
         let mut d = doc();
-        style_with_font(&mut d, Some(0), Some(16.0), Some("Georgia")).unwrap();
+        style_with_font(
+            &mut d,
+            Some(0),
+            &FontEdit {
+                size_pt: Some(16.0),
+                name: Some("Georgia"),
+                ..FontEdit::default()
+            },
+        )
+        .unwrap();
         let out = String::from_utf8(d.serialize().unwrap()).unwrap();
         assert!(
             out.contains(r#"<name val="Georgia"/><sz val="16"/>"#),
@@ -320,7 +415,15 @@ mod tests {
 <cellXfs count="1"><xf fontId="0"/></cellXfs>
 </styleSheet>"#;
         let mut d = Document::parse(WITH_SCHEME.to_vec(), &Limits::strict()).unwrap();
-        style_with_font(&mut d, Some(0), None, Some("Georgia")).unwrap();
+        style_with_font(
+            &mut d,
+            Some(0),
+            &FontEdit {
+                name: Some("Georgia"),
+                ..FontEdit::default()
+            },
+        )
+        .unwrap();
         let out = String::from_utf8(d.serialize().unwrap()).unwrap();
         assert!(out.contains(r#"<name val="Georgia"/>"#), "{out}");
         assert_eq!(
@@ -333,15 +436,141 @@ mod tests {
     #[test]
     fn absurd_name_is_rejected_loudly() {
         let mut d = doc();
-        assert!(style_with_font(&mut d, None, None, Some("")).is_err());
-        assert!(style_with_font(&mut d, None, None, Some(&"x".repeat(32))).is_err());
+        assert!(
+            style_with_font(
+                &mut d,
+                None,
+                &FontEdit {
+                    name: Some(""),
+                    ..FontEdit::default()
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            style_with_font(
+                &mut d,
+                None,
+                &FontEdit {
+                    name: Some(&"x".repeat(32)),
+                    ..FontEdit::default()
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn weights_are_added_and_removed_as_elements() {
+        let mut d = doc();
+        // Включаем жирность у обычного шрифта.
+        let a = style_with_font(
+            &mut d,
+            Some(0),
+            &FontEdit {
+                bold: Some(true),
+                ..FontEdit::default()
+            },
+        )
+        .unwrap();
+        let out = String::from_utf8(d.serialize().unwrap()).unwrap();
+        assert!(out.contains("<b/>"), "{out}");
+
+        // Снимаем жирность у второго шрифта, который был жирным: элемент
+        // обязан исчезнуть, а не превратиться в `<b val="0"/>`.
+        let mut d2 = doc();
+        style_with_font(
+            &mut d2,
+            Some(1),
+            &FontEdit {
+                bold: Some(false),
+                ..FontEdit::default()
+            },
+        )
+        .unwrap();
+        let out2 = String::from_utf8(d2.serialize().unwrap()).unwrap();
+        assert!(!out2.contains(r#"<b val="0""#), "{out2}");
+        assert_eq!(
+            out2.matches("<b/>").count(),
+            1,
+            "жирность снялась не у того шрифта: {out2}"
+        );
+        assert!(a >= 2);
+    }
+
+    #[test]
+    fn toggling_back_reuses_the_original_style() {
+        // Включили и выключили — должны вернуться к исходному шрифту, а не
+        // завести его копию. Иначе жмущий кнопку туда-сюда раздувает файл.
+        let mut d = doc();
+        let on = style_with_font(
+            &mut d,
+            Some(0),
+            &FontEdit {
+                bold: Some(true),
+                ..FontEdit::default()
+            },
+        )
+        .unwrap();
+        let off = style_with_font(
+            &mut d,
+            Some(on),
+            &FontEdit {
+                bold: Some(false),
+                ..FontEdit::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(off, 0, "возврат к исходному стилю не сработал");
+        let out = String::from_utf8(d.serialize().unwrap()).unwrap();
+        assert_eq!(out.matches("<font>").count(), 3, "{out}");
+    }
+
+    #[test]
+    fn all_three_weights_combine() {
+        let mut d = doc();
+        style_with_font(
+            &mut d,
+            Some(0),
+            &FontEdit {
+                bold: Some(true),
+                italic: Some(true),
+                underline: Some(true),
+                ..FontEdit::default()
+            },
+        )
+        .unwrap();
+        let out = String::from_utf8(d.serialize().unwrap()).unwrap();
+        for tag in ["<b/>", "<i/>", "<u/>"] {
+            assert!(out.contains(tag), "нет {tag}: {out}");
+        }
     }
 
     #[test]
     fn absurd_size_is_rejected_loudly() {
         let mut d = doc();
-        assert!(style_with_font(&mut d, Some(0), Some(0.0), None).is_err());
-        assert!(style_with_font(&mut d, Some(0), Some(500.0), None).is_err());
+        assert!(
+            style_with_font(
+                &mut d,
+                Some(0),
+                &FontEdit {
+                    size_pt: Some(0.0),
+                    ..FontEdit::default()
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            style_with_font(
+                &mut d,
+                Some(0),
+                &FontEdit {
+                    size_pt: Some(500.0),
+                    ..FontEdit::default()
+                }
+            )
+            .is_err()
+        );
         // Отказ не должен ничего дописать.
         let out = String::from_utf8(d.serialize().unwrap()).unwrap();
         assert_eq!(out.matches("<font>").count(), 2, "{out}");

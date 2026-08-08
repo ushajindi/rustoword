@@ -17,6 +17,8 @@ button:hover,label.file:hover{background:#f0f0ec}
 #size,#family{padding:4px 6px;border:1px solid var(--line);border-radius:6px;background:#fff;font:inherit}
 #size{min-width:76px}
 #family{min-width:170px}
+.w{min-width:32px;font-size:14px}
+.w.on{background:#dbe8fb;border-color:#7aa7e0}
 #formula{flex:1;padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:#fff;font-family:ui-monospace,monospace}
 #stage{flex:1;position:relative;overflow:hidden;background:#fff}
 canvas{position:absolute;inset:0;display:block}
@@ -41,6 +43,9 @@ footer{display:flex;gap:8px;align-items:center;padding:6px 12px;border-top:1px s
   </select>
   <button id="less" title="уменьшить">A−</button>
   <button id="more" title="увеличить">A+</button>
+  <button id="bold" class="w" title="полужирный"><b>Ж</b></button>
+  <button id="italic" class="w" title="курсив"><i>К</i></button>
+  <button id="under" class="w" title="подчёркнутый"><u>Ч</u></button>
   <input id="formula" placeholder="значение ячейки">
   <span class="sp"></span>
   <button id="grid">Сетка</button>
@@ -84,6 +89,9 @@ const W = {
   save() { return this.take(this.ex.ooxml_save()); },
   setFontSize(sheet, row, col, pt) {
     return this.ex.ooxml_set_font_size(sheet, row, col, pt) === 1;
+  },
+  setWeight(sheet, row, col, which, on) {
+    return this.ex.ooxml_set_weight(sheet, row, col, which, on ? 1 : 0) === 1;
   },
   setFontName(sheet, row, col, name) {
     const b = new TextEncoder().encode(name);
@@ -130,6 +138,7 @@ function parseStyles(buf) {
   for (let i = 0; i < n; i++) {
     const flags = r.u8();
     const s = {bold: !!(flags & 1), italic: !!(flags & 2), wrap: !!(flags & 4),
+               underline: !!(flags & 8), strike: !!(flags & 16),
                size: r.f32(), color: css(r.u32()), fill: css(r.u32()),
                ha: r.u8(), va: r.u8(), b: []};
     for (let k = 0; k < 4; k++) s.b.push({w: BORDER[r.u8()] || 0, c: css(r.u32())});
@@ -285,6 +294,15 @@ function draw() {
       ctx.rect(x - left, y, w + left + right, h);
       ctx.clip();
       ctx.fillText(cell.text, tx, ty);
+      // Canvas не умеет text-decoration — линии рисуются вручную по ширине
+      // уже измеренного текста.
+      if (st && (st.underline || st.strike)) {
+        const tw = ctx.measureText(cell.text).width;
+        const x0 = ha === 2 ? tx - tw / 2 : ha === 3 ? tx - tw : tx;
+        ctx.strokeStyle = ctx.fillStyle; ctx.lineWidth = Math.max(1, size / 14);
+        if (st.underline) line(x0, ty + Math.max(1, size * .12), x0 + tw);
+        if (st.strike) line(x0, ty - size * .3, x0 + tw);
+      }
       ctx.restore();
     }
   }
@@ -314,6 +332,14 @@ function draw() {
     const y = ys[r] + oy, h = ys[r + 1] - ys[r];
     if (h > 9) ctx.fillText(String(r + 1), HEAD_W / 2, y + h / 2);
   }
+}
+
+/// Горизонтальная линия толщиной в текущий `lineWidth`.
+function line(x0, y0, x1) {
+  ctx.beginPath();
+  ctx.moveTo(x0, Math.round(y0) + .5);
+  ctx.lineTo(x1, Math.round(y0) + .5);
+  ctx.stroke();
 }
 
 function wrapText(text, max, size) {
@@ -436,6 +462,9 @@ function syncBar() {
   const fam = cellSt && cellSt.font ? cellSt.font : '';
   if (familyBox) {
     familyBox.value = [...familyBox.options].some(o => o.value === fam) ? fam : '';
+  }
+  for (const w of WEIGHTS) {
+    document.getElementById(w.id).classList.toggle('on', weightOn(w.read));
   }
 }
 
@@ -622,6 +651,40 @@ const stepSize = dir => {
                        : SIZES[Math.max(0, (i < 0 ? SIZES.length - 1 : i) - 1)];
   if (next && Math.abs(next - now) > 0.01) applySize(next);
 };
+// ------------------------------------------------------------- начертания
+// Порядок совпадает с нумерацией в мосту: 0 жирное, 1 курсив, 2 подчёркивание.
+const WEIGHTS = [
+  {id: 'bold', which: 0, read: st => st.bold, name: 'полужирный'},
+  {id: 'italic', which: 1, read: st => st.italic, name: 'курсив'},
+  {id: 'under', which: 2, read: st => st.underline, name: 'подчёркивание'},
+];
+
+/// Текущее состояние начертания у выделенной ячейки.
+function weightOn(read) {
+  const cell = S && S.cells.get(sel.r * 65536 + sel.c);
+  const st = cell && ST[cell.style];
+  return st ? !!read(st) : false;
+}
+
+for (const w of WEIGHTS) {
+  document.getElementById(w.id).onclick = () => {
+    if (!S) return;
+    const next = !weightOn(w.read);
+    const t0 = performance.now();
+    if (!W.setWeight(sheetIndex, sel.r, sel.c, w.which, next)) {
+      status.textContent = `${w.name} не изменено: ` + W.error();
+      return;
+    }
+    ST = parseStyles(W.styles());
+    S = parseSheet(W.sheet(sheetIndex));
+    geometry();
+    status.textContent = `${w.name}: ${next ? 'вкл' : 'выкл'} в ${colName(sel.c)}${sel.r + 1} за ${(performance.now() - t0).toFixed(0)} мс`;
+    syncBar();
+    draw();
+    edit.focus();
+  };
+}
+
 document.getElementById('more').onclick = () => stepSize(1);
 document.getElementById('less').onclick = () => stepSize(-1);
 

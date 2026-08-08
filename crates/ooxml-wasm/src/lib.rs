@@ -256,7 +256,8 @@ fn format_number(v: f64) -> String {
 ///
 /// ```text
 /// u32 n_styles, затем n_styles × запись:
-///   u8  flags        — бит0 жирный, бит1 курсив, бит2 перенос
+///   u8  flags        — бит0 жирный, бит1 курсив, бит2 перенос,
+///                      бит3 подчёркнутый, бит4 зачёркнутый
 ///   f32 font_size_px
 ///   u32 color_rgb    — 0xFF000000 означает «цвет по контексту»
 ///   u32 fill_rgb     — то же
@@ -313,6 +314,12 @@ fn build_styles(bytes: &[u8]) -> Result<Vec<u8>, String> {
         }
         if xf.is_some_and(|x| x.wrap) {
             flags |= 4;
+        }
+        if font.is_some_and(|f| f.underline) {
+            flags |= 8;
+        }
+        if font.is_some_and(|f| f.strike) {
+            flags |= 16;
         }
         o.push(flags);
 
@@ -501,6 +508,41 @@ pub unsafe extern "C" fn ooxml_set_font_name(
             .map_err(|e| e.to_string())?
             .set_font_name(at, &name)
             .map_err(|e| e.to_string())?;
+        wb.save().map_err(|e| e.to_string())
+    })();
+    match result {
+        Ok(next) => {
+            st.bytes = next;
+            1
+        }
+        Err(e) => {
+            st.bytes = bytes;
+            st.error = e;
+            0
+        }
+    }
+}
+
+/// Включает или снимает начертание: 0 — жирное, 1 — курсив, 2 — подчёркивание.
+///
+/// Возвращает 1 при успехе, 0 при ошибке.
+#[unsafe(no_mangle)]
+pub extern "C" fn ooxml_set_weight(sheet: u32, row: u32, col: u32, which: u32, on: u32) -> u32 {
+    let Some(st) = state() else { return 0 };
+    let bytes = mem::take(&mut st.bytes);
+    let result = (|| -> Result<Vec<u8>, String> {
+        let mut wb =
+            Workbook::open_with_limits(&bytes, Limits::strict()).map_err(|e| e.to_string())?;
+        let at = ooxml::xlsx::CellRef::checked(row, col).map_err(|e| e.to_string())?;
+        let mut sh = wb.sheet(sheet as usize).map_err(|e| e.to_string())?;
+        let flag = on == 1;
+        match which {
+            0 => sh.set_bold(at, flag),
+            1 => sh.set_italic(at, flag),
+            2 => sh.set_underline(at, flag),
+            _ => Err(ooxml::Error::Unsupported("неизвестное начертание")),
+        }
+        .map_err(|e| e.to_string())?;
         wb.save().map_err(|e| e.to_string())
     })();
     match result {

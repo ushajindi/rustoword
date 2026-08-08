@@ -55,6 +55,7 @@ use crate::xlsx::scan::{
     SML_NS, SheetLayout, scan_layout, scan_merges, scan_sheet, sheet_dimension,
     sheet_shows_grid_lines,
 };
+use crate::xlsx::stylewrite::FontEdit;
 use crate::xlsx::workbook::Workbook;
 
 /// Куда `set_string` кладёт текст.
@@ -325,7 +326,58 @@ impl Sheet<'_, '_> {
     /// [`Error::Unsupported`] при кегле вне диапазона Excel (1..409) или если
     /// в книге нет `xl/styles.xml`; ошибки XML.
     pub fn set_font_size(&mut self, at: CellRef, points: f64) -> Result<()> {
-        self.set_font(at, Some(points), None)
+        self.set_font(
+            at,
+            &FontEdit {
+                size_pt: Some(points),
+                ..FontEdit::default()
+            },
+        )
+    }
+
+    /// Включает или снимает полужирное начертание.
+    ///
+    /// # Errors
+    ///
+    /// Ошибки XML; [`Error::Unsupported`], если в книге нет `xl/styles.xml`.
+    pub fn set_bold(&mut self, at: CellRef, on: bool) -> Result<()> {
+        self.set_font(
+            at,
+            &FontEdit {
+                bold: Some(on),
+                ..FontEdit::default()
+            },
+        )
+    }
+
+    /// Включает или снимает курсив.
+    ///
+    /// # Errors
+    ///
+    /// Ошибки XML; [`Error::Unsupported`], если в книге нет `xl/styles.xml`.
+    pub fn set_italic(&mut self, at: CellRef, on: bool) -> Result<()> {
+        self.set_font(
+            at,
+            &FontEdit {
+                italic: Some(on),
+                ..FontEdit::default()
+            },
+        )
+    }
+
+    /// Включает или снимает подчёркивание.
+    ///
+    /// # Errors
+    ///
+    /// Ошибки XML; [`Error::Unsupported`], если в книге нет `xl/styles.xml`.
+    pub fn set_underline(&mut self, at: CellRef, on: bool) -> Result<()> {
+        self.set_font(
+            at,
+            &FontEdit {
+                underline: Some(on),
+                ..FontEdit::default()
+            },
+        )
     }
 
     /// Задаёт гарнитуру шрифта ячейки.
@@ -334,17 +386,23 @@ impl Sheet<'_, '_> {
     ///
     /// [`Error::Unsupported`] при пустом или слишком длинном имени; ошибки XML.
     pub fn set_font_name(&mut self, at: CellRef, name: &str) -> Result<()> {
-        self.set_font(at, None, Some(name))
+        self.set_font(
+            at,
+            &FontEdit {
+                name: Some(name),
+                ..FontEdit::default()
+            },
+        )
     }
 
-    /// Общий путь правки шрифта. `None` означает «оставить как было».
-    fn set_font(&mut self, at: CellRef, points: Option<f64>, name: Option<&str>) -> Result<()> {
+    /// Общий путь правки шрифта. `None` в поле означает «оставить как было».
+    fn set_font(&mut self, at: CellRef, want: &FontEdit<'_>) -> Result<()> {
         check_ref(at)?;
         let current = self.get(at)?.and_then(|c| c.style);
 
         let style = {
             let doc = self.wb.styles_dom()?;
-            crate::xlsx::stylewrite::style_with_font(doc, current, points, name)?
+            crate::xlsx::stylewrite::style_with_font(doc, current, want)?
         };
 
         let i = self.at;
